@@ -1,0 +1,1281 @@
+import { useState, useRef, useEffect } from "react";
+import { supabase } from "@/lib/supabase";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Printer,
+  Upload,
+  FileText,
+  CheckCircle2,
+  Clock,
+  XCircle,
+  IndianRupee,
+  ListOrdered,
+  Layers,
+  AlertCircle,
+  RefreshCw,
+} from "lucide-react";
+import { useAuth } from "@/contexts/AuthContext";
+import { cn } from "@/lib/utils";
+
+// ---------- Types ----------
+
+type PrintColor = "bw" | "color";
+type PrintSide = "single" | "double";
+type PrintOrientation = "portrait" | "landscape";
+type PrintBinding = "none" | "soft" | "spiral";
+type JobStatus =
+  | "pending_payment"
+  | "queued"
+  | "printing"
+  | "completed"
+  | "cancelled";
+
+interface PrintJob {
+  id: string;
+  queueNo: number;
+  submittedBy: string;
+  rollNo: string;
+  fileName: string;
+  pages: number;
+  copies: number;
+  color: PrintColor;
+  side: PrintSide;
+  orientation: PrintOrientation;
+  binding: PrintBinding;
+  printCost: number;
+  bindingCost: number;
+  amount: number;
+  status: JobStatus;
+  submittedAt: string;
+  paymentId?: string;
+  fileUrl?: string;
+  studentEmail?: string;
+}
+
+interface FileEntry {
+  id: string;
+  file: File;
+  pagesInput: string;
+  detectedPages: number | null;
+  copiesInput: string;
+  color: PrintColor;
+  side: PrintSide;
+  orientation: PrintOrientation;
+  binding: PrintBinding;
+}
+
+// ---------- Mock initial queue data (FIFO order) ----------
+
+const mockQueue: PrintJob[] = [
+  {
+    id: "job-001",
+    queueNo: 1,
+    submittedBy: "Arun Kumar",
+    rollNo: "21CS001",
+    fileName: "Assignment_DSA.pdf",
+    pages: 12,
+    copies: 1,
+    color: "bw",
+    side: "double",
+    orientation: "portrait",
+    binding: "none",
+    printCost: 36,
+    bindingCost: 0,
+    amount: 36,
+    status: "printing",
+    submittedAt: "2026-03-13T08:10:00",
+    paymentId: "pay_QxA12bXc",
+  },
+  {
+    id: "job-002",
+    queueNo: 2,
+    submittedBy: "Priya S",
+    rollNo: "21CS045",
+    fileName: "Lab_Report_5.pdf",
+    pages: 8,
+    copies: 2,
+    color: "color",
+    side: "single",
+    orientation: "portrait",
+    binding: "soft",
+    printCost: 80,
+    bindingCost: 60,
+    amount: 140,
+    status: "queued",
+    submittedAt: "2026-03-13T08:22:00",
+    paymentId: "pay_Qx9KmTzR",
+  },
+  {
+    id: "job-003",
+    queueNo: 3,
+    submittedBy: "Rahul V",
+    rollNo: "21ME018",
+    fileName: "Project_Report_Final.pdf",
+    pages: 40,
+    copies: 1,
+    color: "bw",
+    side: "double",
+    orientation: "portrait",
+    binding: "spiral",
+    printCost: 120,
+    bindingCost: 50,
+    amount: 170,
+    status: "queued",
+    submittedAt: "2026-03-13T08:35:00",
+    paymentId: "pay_QxBnw0Pt",
+  },
+  {
+    id: "job-004",
+    queueNo: 4,
+    submittedBy: "Sneha R",
+    rollNo: "21EC030",
+    fileName: "Circuit_Diagrams.pdf",
+    pages: 6,
+    copies: 3,
+    color: "color",
+    side: "single",
+    orientation: "landscape",
+    binding: "none",
+    printCost: 90,
+    bindingCost: 0,
+    amount: 90,
+    status: "queued",
+    submittedAt: "2026-03-13T09:00:00",
+    paymentId: "pay_QxD2vSqM",
+  },
+];
+
+// ---------- DB mapper ----------
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function dbToJob(row: { [key: string]: any }): PrintJob {
+  return {
+    id: row.id,
+    queueNo: row.queue_no,
+    submittedBy: row.submitted_by,
+    rollNo: row.roll_no,
+    fileName: row.file_name,
+    pages: row.pages,
+    copies: row.copies,
+    color: row.color as PrintColor,
+    side: row.side as PrintSide,
+    orientation: row.orientation as PrintOrientation,
+    binding: row.binding as PrintBinding,
+    printCost: row.print_cost,
+    bindingCost: row.binding_cost,
+    amount: row.amount,
+    status: row.status as JobStatus,
+    submittedAt: row.submitted_at,
+    paymentId: row.payment_id ?? undefined,
+    fileUrl: row.file_url ?? undefined,
+    studentEmail: row.student_email ?? undefined,
+  };
+}
+
+// ---------- Helpers ----------
+
+const RATES: Record<PrintColor, Record<PrintSide, number>> = {
+  bw: { single: 2, double: 3 },
+  color: { single: 5, double: 8 },
+};
+
+const BINDING_RATES: Record<PrintBinding, number> = {
+  none: 0,
+  soft: 30,
+  spiral: 50,
+};
+
+const BINDING_LABELS: Record<PrintBinding, string> = {
+  none: "No Binding",
+  soft: "Soft Binding",
+  spiral: "Spiral Binding",
+};
+
+function calcCosts(
+  pages: number,
+  copies: number,
+  color: PrintColor,
+  side: PrintSide,
+  binding: PrintBinding
+): { printCost: number; bindingCost: number; amount: number } {
+  const printCost = pages * copies * RATES[color][side];
+  const bindingCost = BINDING_RATES[binding]; // charged once per job, not per copy
+  return { printCost, bindingCost, amount: printCost + bindingCost };
+}
+
+function formatTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function getFileTypeMeta(fileName: string): { label: string; bg: string; text: string } {
+  const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
+  if (ext === "pdf")                                    return { label: "PDF",  bg: "bg-red-600",    text: "text-white" };
+  if (["doc", "docx"].includes(ext))                   return { label: "DOC",  bg: "bg-blue-600",   text: "text-white" };
+  if (["xls", "xlsx"].includes(ext))                   return { label: "XLS",  bg: "bg-green-600",  text: "text-white" };
+  if (["ppt", "pptx"].includes(ext))                   return { label: "PPT",  bg: "bg-orange-500", text: "text-white" };
+  if (["jpg", "jpeg"].includes(ext))                   return { label: "JPG",  bg: "bg-purple-500", text: "text-white" };
+  if (ext === "png")                                   return { label: "PNG",  bg: "bg-purple-500", text: "text-white" };
+  if (["gif", "webp", "svg"].includes(ext))            return { label: ext.toUpperCase(), bg: "bg-purple-400", text: "text-white" };
+  if (ext === "txt")                                   return { label: "TXT",  bg: "bg-gray-500",   text: "text-white" };
+  return { label: ext.toUpperCase() || "FILE", bg: "bg-gray-400", text: "text-white" };
+}
+
+const FileTypeBadge = ({ fileName }: { fileName: string }) => {
+  const { label, bg, text } = getFileTypeMeta(fileName);
+  return (
+    <span className={cn("inline-flex items-center justify-center rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wide flex-shrink-0", bg, text)}>
+      {label}
+    </span>
+  );
+};
+
+const statusConfig: Record<
+  JobStatus,
+  { label: string; color: string; icon: React.ElementType }
+> = {
+  pending_payment: {
+    label: "Pending Payment",
+    color: "bg-yellow-100 text-yellow-800 border-yellow-200",
+    icon: AlertCircle,
+  },
+  queued: {
+    label: "Queued",
+    color: "bg-blue-100 text-blue-800 border-blue-200",
+    icon: Clock,
+  },
+  printing: {
+    label: "Printing",
+    color: "bg-purple-100 text-purple-800 border-purple-200",
+    icon: RefreshCw,
+  },
+  completed: {
+    label: "Completed",
+    color: "bg-green-100 text-green-800 border-green-200",
+    icon: CheckCircle2,
+  },
+  cancelled: {
+    label: "Cancelled",
+    color: "bg-red-100 text-red-800 border-red-200",
+    icon: XCircle,
+  },
+};
+
+// ---------- QR Modal ----------
+
+interface PaymentModalProps {
+  open: boolean;
+  jobs: PrintJob[];
+  onConfirm: (jobIds: string[]) => void;
+  onClose: () => void;
+}
+
+const PaymentModal = ({ open, jobs, onConfirm, onClose }: PaymentModalProps) => {
+  const [paid, setPaid] = useState(false);
+
+  if (!jobs.length) return null;
+
+  const totalAmount = jobs.reduce((s, j) => s + j.amount, 0);
+
+  const handleConfirm = () => {
+    setPaid(true);
+    setTimeout(() => {
+      onConfirm(jobs.map((j) => j.id));
+      setPaid(false);
+    }, 1200);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onClose}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <IndianRupee className="w-5 h-5 text-primary" />
+            Complete Payment
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-5">
+          {/* Order breakdown — shown ABOVE the QR code */}
+          <div className="bg-muted/50 rounded-lg p-3 space-y-2 text-sm">
+            {jobs.map((job, i) => (
+              <div key={job.id} className="space-y-1">
+                {jobs.length > 1 && (
+                  <p className="text-xs font-semibold text-foreground/70 uppercase tracking-wide">
+                    File {i + 1}: {job.fileName}
+                  </p>
+                )}
+                {jobs.length === 1 && (
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">File</span>
+                    <span className="font-medium truncate max-w-[160px]">{job.fileName}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>
+                    {job.pages}pg × {job.copies} {job.copies === 1 ? "copy" : "copies"} × ₹{RATES[job.color][job.side]} ({job.color === "bw" ? "B&W" : "Color"} {job.side === "single" ? "Single" : "Double"})
+                  </span>
+                  <span>₹{job.printCost}</span>
+                </div>
+                {job.bindingCost > 0 && (
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>{BINDING_LABELS[job.binding]}</span>
+                    <span>₹{job.bindingCost}</span>
+                  </div>
+                )}
+                {jobs.length > 1 && i < jobs.length - 1 && (
+                  <div className="border-t border-border/40 mt-1" />
+                )}
+              </div>
+            ))}
+            <div className="flex justify-between font-bold text-base pt-2 border-t border-border">
+              <span>Total Amount</span>
+              <span className="text-primary">₹{totalAmount}</span>
+            </div>
+          </div>
+
+          {/* Razorpay QR */}
+          <div className="flex flex-col items-center gap-3">
+            <div className="border-2 border-primary/20 rounded-xl p-3 bg-white">
+              {/* Razorpay branding */}
+              <div className="flex items-center justify-center gap-1 mb-2">
+                <div className="w-5 h-5 rounded bg-[#072654] flex items-center justify-center">
+                  <span className="text-white text-[9px] font-bold">R</span>
+                </div>
+                <span className="text-xs font-semibold text-[#072654]">Razorpay</span>
+              </div>
+
+              {/* QR Code placeholder grid */}
+              <div className="w-44 h-44 relative">
+                <svg
+                  viewBox="0 0 200 200"
+                  className="w-full h-full"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  {/* Corner squares */}
+                  <rect x="10" y="10" width="50" height="50" rx="4" fill="none" stroke="#072654" strokeWidth="6"/>
+                  <rect x="20" y="20" width="30" height="30" rx="2" fill="#072654"/>
+                  <rect x="140" y="10" width="50" height="50" rx="4" fill="none" stroke="#072654" strokeWidth="6"/>
+                  <rect x="150" y="20" width="30" height="30" rx="2" fill="#072654"/>
+                  <rect x="10" y="140" width="50" height="50" rx="4" fill="none" stroke="#072654" strokeWidth="6"/>
+                  <rect x="20" y="150" width="30" height="30" rx="2" fill="#072654"/>
+                  {/* Data pattern */}
+                  {[70,80,90,100,110,120,130].map((x) =>
+                    [10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160,170,180].map((y) =>
+                      Math.sin(x * y * 0.003 + x * 0.1) > 0.2 ? (
+                        <rect key={`${x}-${y}`} x={x} y={y} width="8" height="8" rx="1" fill="#072654"/>
+                      ) : null
+                    )
+                  )}
+                  {[10,20,30,40,50,60].map((x) =>
+                    [70,80,90,100,110,120,130].map((y) =>
+                      Math.cos(x * y * 0.004 + y * 0.12) > 0.3 ? (
+                        <rect key={`l-${x}-${y}`} x={x} y={y} width="8" height="8" rx="1" fill="#072654"/>
+                      ) : null
+                    )
+                  )}
+                  {[140,150,160,170,180].map((x) =>
+                    [70,80,90,100,110,120,130].map((y) =>
+                      Math.sin(x * 0.07 + y * 0.09) > 0.1 ? (
+                        <rect key={`r-${x}-${y}`} x={x} y={y} width="8" height="8" rx="1" fill="#072654"/>
+                      ) : null
+                    )
+                  )}
+                  {/* Center logo */}
+                  <rect x="84" y="84" width="32" height="32" rx="4" fill="white" stroke="#072654" strokeWidth="1"/>
+                  <text x="100" y="105" textAnchor="middle" fontSize="14" fontWeight="bold" fill="#072654">₹</text>
+                </svg>
+              </div>
+
+              <p className="text-center text-xs text-muted-foreground mt-1">
+                Scan with any UPI app
+              </p>
+            </div>
+
+            <div className="text-center">
+              <p className="text-sm font-semibold text-foreground">RIT Print Services</p>
+              <p className="text-xs text-muted-foreground">UPI: ritprint@razorpay</p>
+            </div>
+          </div>
+
+          {/* Action buttons */}
+          {!paid ? (
+            <div className="flex gap-3">
+              <Button variant="outline" className="flex-1" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button className="flex-1 gap-2" onClick={handleConfirm}>
+                <CheckCircle2 className="w-4 h-4" />
+                Payment Done
+              </Button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-2 py-2 text-green-600 font-semibold">
+              <CheckCircle2 className="w-5 h-5 animate-bounce" />
+              Payment Confirmed! Adding to queue...
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+// ---------- Upload Form ----------
+
+interface UploadFormProps {
+  onSubmit: (items: Array<{ job: Omit<PrintJob, "id" | "queueNo" | "status" | "submittedAt">; file: File }>) => void;
+  submitterName: string;
+  rollNo: string;
+}
+
+// Inline button-group toggle for print options — selected=dark pill, unselected=plain text
+function OptionToggle<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: { value: T; label: string }[];
+  value: T;
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      {options.map((opt) => (
+        <button
+          key={opt.value}
+          type="button"
+          onClick={() => onChange(opt.value)}
+          className={cn(
+            "text-sm transition-all",
+            value === opt.value
+              ? "bg-blue-600 text-white font-semibold rounded-full px-2.5 py-0.5"
+              : "text-muted-foreground hover:text-foreground"
+          )}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function parsePages(pagesInput: string): number {
+  const trimmed = pagesInput.trim();
+  const rangeMatch = trimmed.match(/^(\d+)\s*-\s*(\d+)$/);
+  if (rangeMatch) {
+    const start = parseInt(rangeMatch[1]);
+    const end = parseInt(rangeMatch[2]);
+    if (start >= 1 && end >= start) return end - start + 1;
+  }
+  return Math.max(1, parseInt(trimmed) || 1);
+}
+
+function parseCopies(copiesInput: string): number {
+  return Math.max(1, Math.min(20, parseInt(copiesInput) || 1));
+}
+
+const UploadForm = ({ onSubmit, submitterName, rollNo }: UploadFormProps) => {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [entries, setEntries] = useState<FileEntry[]>([]);
+  const [dragging, setDragging] = useState(false);
+
+  const addFiles = (files: File[]) => {
+    const newEntries: FileEntry[] = files.map((f) => ({
+      id: Math.random().toString(36).slice(2),
+      file: f,
+      pagesInput: "1",
+      detectedPages: null,
+      copiesInput: "1",
+      color: "bw" as PrintColor,
+      side: "single" as PrintSide,
+      orientation: "portrait" as PrintOrientation,
+      binding: "none" as PrintBinding,
+    }));
+    setEntries((prev) => [...prev, ...newEntries]);
+    // auto-detect pages for PDFs
+    newEntries.forEach((entry) => {
+      if (entry.file.name.split(".").pop()?.toLowerCase() !== "pdf") return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        const matches = [...content.matchAll(/\/Count\s+(\d+)/g)];
+        if (matches.length > 0) {
+          const total = Math.max(...matches.map((m) => parseInt(m[1])));
+          if (total > 0) {
+            setEntries((prev) =>
+              prev.map((en) =>
+                en.id === entry.id
+                  ? { ...en, detectedPages: total, pagesInput: `1-${total}` }
+                  : en
+              )
+            );
+          }
+        }
+      };
+      reader.readAsBinaryString(entry.file);
+    });
+  };
+
+  const updateEntry = (id: string, updates: Partial<FileEntry>) =>
+    setEntries((prev) => prev.map((e) => (e.id === id ? { ...e, ...updates } : e)));
+
+  const removeEntry = (id: string) =>
+    setEntries((prev) => prev.filter((e) => e.id !== id));
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    addFiles(Array.from(e.dataTransfer.files));
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.length) {
+      addFiles(Array.from(e.target.files));
+      e.target.value = "";
+    }
+  };
+
+  const getEntryCosts = (entry: FileEntry) => {
+    const pages = parsePages(entry.pagesInput);
+    const copies = parseCopies(entry.copiesInput);
+    return calcCosts(pages, copies, entry.color, entry.side, entry.binding);
+  };
+
+  const totalAmount = entries.reduce((sum, e) => sum + getEntryCosts(e).amount, 0);
+
+  const handleSubmit = () => {
+    if (!entries.length) return;
+    const items = entries.map((entry) => {
+      const pages = parsePages(entry.pagesInput);
+      const copies = parseCopies(entry.copiesInput);
+      const { printCost, bindingCost, amount } = calcCosts(pages, copies, entry.color, entry.side, entry.binding);
+      return {
+        job: {
+          submittedBy: submitterName,
+          rollNo,
+          fileName: entry.file.name,
+          pages,
+          copies,
+          color: entry.color,
+          side: entry.side,
+          orientation: entry.orientation,
+          binding: entry.binding,
+          printCost,
+          bindingCost,
+          amount,
+          paymentId: undefined,
+        } as Omit<PrintJob, "id" | "queueNo" | "status" | "submittedAt">,
+        file: entry.file,
+      };
+    });
+    onSubmit(items);
+    setEntries([]);
+  };
+
+  return (
+    <Card className="border-none shadow-card">
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <Upload className="w-5 h-5 text-primary" />
+          Submit Print Job
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Drop zone */}
+        <div
+          onClick={() => fileInputRef.current?.click()}
+          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={handleDrop}
+          className={cn(
+            "border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-all duration-200",
+            dragging
+              ? "border-primary bg-primary/5 scale-[1.01]"
+              : entries.length
+              ? "border-primary/40 bg-primary/5"
+              : "border-border hover:border-primary/50 hover:bg-muted/40"
+          )}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.jpg,.jpeg,.png,.gif,.webp,.svg,.txt"
+            multiple
+            className="hidden"
+            onChange={handleFileChange}
+          />
+          <div className="flex flex-col items-center gap-1.5">
+            <Upload className="w-8 h-8 text-muted-foreground/50" />
+            <p className="font-medium text-sm text-foreground">
+              {entries.length ? "Add more files" : "Drop files here or click to browse"}
+            </p>
+            <p className="text-xs text-muted-foreground">PDF, Word, Excel, PPT, Image — multiple files supported</p>
+          </div>
+        </div>
+
+        {/* File entries list */}
+        {entries.length > 0 && (
+          <div className="space-y-3">
+            {entries.map((entry) => {
+              const { printCost, bindingCost, amount } = getEntryCosts(entry);
+              const pages = parsePages(entry.pagesInput);
+              const copies = parseCopies(entry.copiesInput);
+              return (
+                <div key={entry.id} className="border border-border rounded-xl p-3 space-y-3 bg-muted/20">
+                  {/* File header */}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <FileTypeBadge fileName={entry.file.name} />
+                      <span className="text-sm font-medium truncate">{entry.file.name}</span>
+                      {entry.detectedPages !== null && (
+                        <span className="text-xs text-green-600 font-medium flex-shrink-0">
+                          {entry.detectedPages}pg
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeEntry(entry.id)}
+                      className="text-muted-foreground hover:text-destructive flex-shrink-0 p-1"
+                    >
+                      <XCircle className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Pages & Copies row */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">Pages</Label>
+                      <Input
+                        type="text"
+                        placeholder="e.g. 10 or 1-10"
+                        value={entry.pagesInput}
+                        className="h-8 text-xs"
+                        onChange={(e) => updateEntry(entry.id, { pagesInput: e.target.value })}
+                        onBlur={() => {
+                          const t = entry.pagesInput.trim();
+                          if (!/^\d+\s*-\s*\d+$/.test(t)) {
+                            updateEntry(entry.id, { pagesInput: String(Math.max(1, parseInt(t) || 1)) });
+                          }
+                        }}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">Copies</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={entry.copiesInput}
+                        className="h-8 text-xs"
+                        onChange={(e) => updateEntry(entry.id, { copiesInput: e.target.value })}
+                        onBlur={() => updateEntry(entry.id, { copiesInput: String(parseCopies(entry.copiesInput)) })}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Print options — label left, buttons right */}
+                  <div className="border border-border rounded-lg divide-y divide-border/60 text-sm">
+                    <div className="flex items-center justify-between px-3 py-2">
+                      <span className="text-muted-foreground">Print Color</span>
+                      <OptionToggle
+                        options={[
+                          { value: "bw" as PrintColor, label: "B&W" },
+                          { value: "color" as PrintColor, label: "Color" },
+                        ]}
+                        value={entry.color}
+                        onChange={(v) => updateEntry(entry.id, { color: v })}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between px-3 py-2">
+                      <span className="text-muted-foreground">Sides</span>
+                      <OptionToggle
+                        options={[
+                          { value: "single" as PrintSide, label: "Single" },
+                          { value: "double" as PrintSide, label: "Double" },
+                        ]}
+                        value={entry.side}
+                        onChange={(v) => updateEntry(entry.id, { side: v })}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between px-3 py-2">
+                      <span className="text-muted-foreground">Orientation</span>
+                      <OptionToggle
+                        options={[
+                          { value: "portrait" as PrintOrientation, label: "Portrait" },
+                          { value: "landscape" as PrintOrientation, label: "Landscape" },
+                        ]}
+                        value={entry.orientation}
+                        onChange={(v) => updateEntry(entry.id, { orientation: v })}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between px-3 py-2">
+                      <span className="text-muted-foreground">Binding</span>
+                      <OptionToggle
+                        options={[
+                          { value: "none" as PrintBinding, label: "None" },
+                          { value: "soft" as PrintBinding, label: "Soft +₹30" },
+                          { value: "spiral" as PrintBinding, label: "Spiral +₹50" },
+                        ]}
+                        value={entry.binding}
+                        onChange={(v) => updateEntry(entry.id, { binding: v })}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Per-file cost breakdown */}
+                  <div className="text-xs bg-muted/40 rounded-lg px-3 py-2 space-y-1">
+                    <div className="flex justify-between text-muted-foreground">
+                      <span>
+                        Print ({pages}pg × {copies} {copies === 1 ? "copy" : "copies"} × ₹{RATES[entry.color][entry.side]})
+                      </span>
+                      <span>₹{printCost}</span>
+                    </div>
+                    <div className="flex justify-between text-muted-foreground">
+                      <span>{BINDING_LABELS[entry.binding]}</span>
+                      <span>{bindingCost > 0 ? `₹${bindingCost}` : "Free"}</span>
+                    </div>
+                    <div className="flex justify-between font-semibold text-foreground border-t border-border/50 pt-1">
+                      <span>Subtotal</span>
+                      <span>₹{amount}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Rate guide */}
+        <div className="bg-muted/40 rounded-lg px-4 py-3 text-xs space-y-2">
+          <p className="font-semibold text-foreground text-xs uppercase tracking-wide">Pricing Guide</p>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
+            <span className="text-foreground/80">B&amp;W Single: <strong>₹2/page</strong></span>
+            <span className="text-foreground/80">B&amp;W Double: <strong>₹3/page</strong></span>
+            <span className="text-foreground/80">Color Single: <strong>₹5/page</strong></span>
+            <span className="text-foreground/80">Color Double: <strong>₹8/page</strong></span>
+          </div>
+          <div className="border-t border-border/50 pt-1.5 grid grid-cols-2 gap-x-4 gap-y-0.5">
+            <span className="text-foreground/80">No Binding: <strong>Free</strong></span>
+            <span className="text-foreground/80">Soft Binding: <strong>₹30</strong></span>
+            <span className="text-foreground/80">Spiral Binding: <strong>₹50</strong></span>
+          </div>
+        </div>
+
+        {/* Combined amount breakdown + submit — shown above payment */}
+        {entries.length > 0 && (
+          <div className="bg-primary/5 rounded-xl p-4 space-y-2">
+            <p className="text-xs font-semibold text-foreground uppercase tracking-wide">Amount Breakdown</p>
+            <div className="space-y-1 text-sm">
+              {entries.map((entry, i) => {
+                const { amount } = getEntryCosts(entry);
+                return (
+                  <div key={entry.id} className="flex justify-between text-foreground/80">
+                    <span className="truncate max-w-[200px]">
+                      {entries.length > 1 ? `File ${i + 1}: ` : ""}{entry.file.name}
+                    </span>
+                    <span className="font-medium text-foreground flex-shrink-0 ml-2">₹{amount}</span>
+                  </div>
+                );
+              })}
+              <div className="flex justify-between border-t border-primary/20 pt-2 mt-1">
+                <span className="font-bold text-foreground">Total</span>
+                <span className="text-2xl font-bold text-primary leading-none">₹{totalAmount}</span>
+              </div>
+            </div>
+
+            <Button
+              className="w-full gap-2 mt-1"
+              disabled={!entries.length}
+              onClick={handleSubmit}
+            >
+              <Printer className="w-4 h-4" />
+              Proceed to Pay — ₹{totalAmount}
+            </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+};
+
+// ---------- Status Badge ----------
+
+const StatusBadge = ({ status }: { status: JobStatus }) => {
+  const cfg = statusConfig[status];
+  const Icon = cfg.icon;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold border",
+        cfg.color
+      )}
+    >
+      <Icon className="w-3 h-3" />
+      {cfg.label}
+    </span>
+  );
+};
+
+// ---------- Main Component ----------
+
+const PrintDashboard = () => {
+  const { user, isAdmin } = useAuth();
+  const admin = isAdmin();
+
+  const [jobs, setJobs] = useState<PrintJob[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [pendingJobs, setPendingJobs] = useState<PrintJob[]>([]);
+  const [showPayment, setShowPayment] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<"all" | "queued" | "completed">("all");
+  const [previewJob, setPreviewJob] = useState<PrintJob | null>(null);
+  const userName = user?.name ?? (admin ? "Admin Officer" : "Student");
+  const rollNo = "—";
+
+  useEffect(() => {
+    const fetchJobs = async (isInitial = false) => {
+      if (isInitial) setLoading(true);
+      const { data, error } = await supabase
+        .from("print_jobs")
+        .select("*")
+        .order("queue_no", { ascending: true });
+      if (!error && data) setJobs(data.map(dbToJob));
+      if (isInitial) setLoading(false);
+    };
+    fetchJobs(true);
+
+    const channel = supabase
+      .channel("print_jobs_changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "print_jobs" }, () => {
+        fetchJobs(false);
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
+  // Stats — scoped to current user's jobs only
+  const myJobs = jobs.filter((j) => j.submittedBy === userName);
+  const myActiveJob = myJobs
+    .filter((j) => j.status === "queued" || j.status === "printing")
+    .sort((a, b) => a.queueNo - b.queueNo)[0];
+  const queuedCount = myActiveJob
+    ? jobs.filter(
+        (j) => (j.status === "queued" || j.status === "printing") && j.queueNo < myActiveJob.queueNo
+      ).length
+    : 0;
+  const totalInQueue = jobs.filter((j) => j.status === "queued" || j.status === "printing").length;
+  const totalRevenue = myJobs
+    .filter((j) => j.status !== "pending_payment" && j.status !== "cancelled")
+    .reduce((s, j) => s + j.amount, 0);
+  const completedCount = myJobs.filter((j) => j.status === "completed").length;
+  const totalPages = myJobs
+    .filter((j) => j.status !== "pending_payment" && j.status !== "cancelled")
+    .reduce((s, j) => s + j.pages * j.copies, 0);
+
+  // each user sees only their own jobs
+  const visibleJobs = myJobs
+    .filter((j) => j.status !== "pending_payment" && j.status !== "cancelled")
+    .filter((j) => statusFilter === "all" || j.status === statusFilter)
+    .sort((a, b) => a.queueNo - b.queueNo);
+
+  const handleUploadSubmit = async (
+    items: Array<{ job: Omit<PrintJob, "id" | "queueNo" | "status" | "submittedAt">; file: File }>
+  ) => {
+    const newJobs: PrintJob[] = [];
+    for (const { job: jobData, file } of items) {
+      // Upload file to Supabase storage
+      const safeFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const filePath = `${Date.now()}_${safeFileName}`;
+      let fileUrl: string | undefined;
+      const { error: uploadError } = await supabase.storage
+        .from("print-files")
+        .upload(filePath, file);
+      if (uploadError) {
+        console.error("File upload error:", uploadError.message);
+      } else {
+        const { data: urlData } = supabase.storage
+          .from("print-files")
+          .getPublicUrl(filePath);
+        fileUrl = urlData.publicUrl;
+      }
+
+      const queueNo = jobs.length + newJobs.length + 1;
+      const { data, error } = await supabase
+        .from("print_jobs")
+        .insert({
+          queue_no: queueNo,
+          submitted_by: jobData.submittedBy,
+          roll_no: jobData.rollNo,
+          file_name: jobData.fileName,
+          pages: jobData.pages,
+          copies: jobData.copies,
+          color: jobData.color,
+          side: jobData.side,
+          orientation: jobData.orientation,
+          binding: jobData.binding,
+          print_cost: jobData.printCost,
+          binding_cost: jobData.bindingCost,
+          amount: jobData.amount,
+          status: "pending_payment",
+          file_url: fileUrl,
+          student_email: user?.email,
+        })
+        .select()
+        .single();
+      if (!error && data) {
+        newJobs.push(dbToJob(data));
+      }
+    }
+    if (newJobs.length) {
+      setJobs((prev) => [...prev, ...newJobs]);
+      setPendingJobs(newJobs);
+      setShowPayment(true);
+    }
+  };
+
+  const handlePaymentConfirm = async (jobIds: string[]) => {
+    const paymentId = `pay_${Math.random().toString(36).slice(2, 10)}`;
+    for (const jobId of jobIds) {
+      const { error } = await supabase
+        .from("print_jobs")
+        .update({ status: "queued", payment_id: paymentId })
+        .eq("id", jobId);
+      if (!error) {
+        setJobs((prev) =>
+          prev.map((j) =>
+            j.id === jobId ? { ...j, status: "queued", paymentId } : j
+          )
+        );
+      }
+    }
+    setShowPayment(false);
+    setPendingJobs([]);
+  };
+
+  const handleStatusChange = async (jobId: string, newStatus: JobStatus) => {
+    const { error } = await supabase
+      .from("print_jobs")
+      .update({ status: newStatus, ...(newStatus === "printing" && { is_priority: true }) })
+      .eq("id", jobId);
+    if (!error) {
+      setJobs((prev) =>
+        prev.map((j) => (j.id === jobId ? { ...j, status: newStatus } : j))
+      );
+    }
+  };
+
+  return (
+    <div className="space-y-6 animate-fade-in">
+      {loading && (
+        <div className="flex items-center justify-center py-20 text-muted-foreground gap-2">
+          <RefreshCw className="w-5 h-5 animate-spin" />
+          <span className="text-sm">Loading print jobs...</span>
+        </div>
+      )}
+      {!loading && (<>
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <h1 className="page-header mb-1">
+            {admin ? "Print Queue Management" : "Print Services"}
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            {admin
+              ? "Manage all student print jobs in FIFO order"
+              : "Submit your PDF and pay to get it printed"}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 text-sm bg-primary/10 text-primary font-medium px-3 py-2 rounded-lg">
+          <ListOrdered className="w-4 h-4" />
+          FIFO Queue Active
+        </div>
+      </div>
+
+      {/* Stat cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <Card className="border-none shadow-card">
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs text-muted-foreground">{admin ? "Total in Queue" : "Ahead of You"}</p>
+                <p className="text-2xl font-bold text-foreground mt-1">{admin ? totalInQueue : queuedCount}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{admin ? "active print jobs" : "in queue before you"}</p>
+              </div>
+              <div className="w-10 h-10 rounded-xl bg-blue-100 flex items-center justify-center">
+                <Clock className="w-5 h-5 text-blue-600" />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-none shadow-card">
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs text-muted-foreground">My Total Spent</p>
+                <p className="text-2xl font-bold text-foreground mt-1">₹{totalRevenue}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">paid jobs only</p>
+              </div>
+              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+                <IndianRupee className="w-5 h-5 text-primary" />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-none shadow-card">
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs text-muted-foreground">Completed</p>
+                <p className="text-2xl font-bold text-foreground mt-1">{completedCount}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">jobs done</p>
+              </div>
+              <div className="w-10 h-10 rounded-xl bg-green-100 flex items-center justify-center">
+                <CheckCircle2 className="w-5 h-5 text-green-600" />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-none shadow-card">
+          <CardContent className="p-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs text-muted-foreground">Total Pages</p>
+                <p className="text-2xl font-bold text-foreground mt-1">{totalPages}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">pages printed</p>
+              </div>
+              <div className="w-10 h-10 rounded-xl bg-orange-100 flex items-center justify-center">
+                <Layers className="w-5 h-5 text-orange-500" />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Main grid */}
+      <div className="grid grid-cols-1 xl:grid-cols-5 gap-6">
+        {/* Upload form — 2 cols on xl */}
+        <div className="xl:col-span-2">
+          <UploadForm
+            onSubmit={handleUploadSubmit}
+            submitterName={userName}
+            rollNo={rollNo}
+          />
+        </div>
+
+        {/* Queue table — 3 cols on xl */}
+        <div className="xl:col-span-3 space-y-4">
+          <Card className="border-none shadow-card">
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between gap-3">
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <Printer className="w-5 h-5 text-primary" />
+                  {admin ? "All Print Jobs" : "My Print Jobs"}
+                </CardTitle>
+                <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as typeof statusFilter)}>
+                  <SelectTrigger className="w-36 h-8 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Status</SelectItem>
+                    <SelectItem value="queued">Queued</SelectItem>
+                    <SelectItem value="completed">Completed</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </CardHeader>
+            <CardContent className="p-0">
+              {visibleJobs.length === 0 ? (
+                <div className="py-16 text-center text-muted-foreground space-y-2">
+                  <Printer className="w-10 h-10 mx-auto text-muted-foreground/30" />
+                  <p className="text-sm">No print jobs found</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/30">
+                        <TableHead className="w-10">#</TableHead>
+                        {admin && <TableHead>Student</TableHead>}
+                        <TableHead>File</TableHead>
+                        <TableHead className="hidden md:table-cell">Options</TableHead>
+                        <TableHead className="hidden sm:table-cell">Amount</TableHead>
+                        <TableHead>Status</TableHead>
+                        {admin && <TableHead className="text-right">Actions</TableHead>}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {visibleJobs.map((job) => (
+                        <TableRow key={job.id} className="hover:bg-muted/20">
+                          <TableCell>
+                            <span className="w-7 h-7 rounded-full bg-primary/10 text-primary text-xs font-bold flex items-center justify-center">
+                              {job.queueNo}
+                            </span>
+                          </TableCell>
+                          {admin && (
+                            <TableCell>
+                              <div>
+                                <p className="font-medium text-sm">{job.submittedBy}</p>
+                                <p className="text-xs text-muted-foreground">{job.rollNo}</p>
+                              </div>
+                            </TableCell>
+                          )}
+                          <TableCell>
+                            <div>
+                              {job.fileUrl ? (
+                                <button
+                                  onClick={() => setPreviewJob(job)}
+                                  className="font-medium text-sm text-primary hover:underline cursor-pointer flex items-center gap-1.5 text-left max-w-[160px]"
+                                >
+                                  <FileTypeBadge fileName={job.fileName} />
+                                  <span className="truncate">{job.fileName}</span>
+                                </button>
+                              ) : (
+                                <div className="flex items-center gap-1.5 max-w-[160px]">
+                                  <FileTypeBadge fileName={job.fileName} />
+                                  <span className="font-medium text-sm truncate">{job.fileName}</span>
+                                </div>
+                              )}
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                {formatDate(job.submittedAt)} · {formatTime(job.submittedAt)}
+                              </p>
+                            </div>
+                          </TableCell>
+                          <TableCell className="hidden md:table-cell">
+                            <div className="text-xs text-muted-foreground space-y-0.5">
+                              <p>{job.pages}pg × {job.copies} copies</p>
+                              <p>{job.color === "bw" ? "B&W" : "Color"} · {job.side === "single" ? "Single" : "Double"} · {job.orientation === "portrait" ? "Portrait" : "Landscape"}</p>
+                              <p>{BINDING_LABELS[job.binding]}</p>
+                            </div>
+                          </TableCell>
+                          <TableCell className="hidden sm:table-cell">
+                            <span className="font-semibold text-primary">₹{job.amount}</span>
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge status={job.status} />
+                          </TableCell>
+                          {admin && (
+                            <TableCell className="text-right">
+                              {job.status === "queued" ? (
+                                <Button
+                                  size="sm"
+                                  className="h-7 text-xs px-3 bg-blue-600 hover:bg-blue-700 text-white gap-1"
+                                  onClick={() => handleStatusChange(job.id, "printing")}
+                                >
+                                  <Printer className="w-3 h-3" />
+                                  Request
+                                </Button>
+                              ) : job.status === "printing" ? (
+                                <span className="inline-flex items-center gap-1 text-xs text-green-600 font-medium">
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  Request Sent
+                                </span>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">—</span>
+                              )}
+                            </TableCell>
+                          )}
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* FIFO info callout */}
+          <Card className="border-none shadow-card bg-gradient-to-r from-primary/5 to-blue-50">
+            <CardContent className="p-4 flex items-start gap-3">
+              <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <ListOrdered className="w-4 h-4 text-primary" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-foreground">First Come, First Served</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Print jobs are processed in the order they are submitted and paid. Your queue
+                  number is assigned at payment confirmation and cannot be changed.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+
+      {/* Payment modal */}
+      <PaymentModal
+        open={showPayment}
+        jobs={pendingJobs}
+        onConfirm={handlePaymentConfirm}
+        onClose={() => {
+          setShowPayment(false);
+          setPendingJobs([]);
+        }}
+      />
+
+      {/* PDF Preview modal */}
+      <Dialog open={!!previewJob} onOpenChange={() => setPreviewJob(null)}>
+        <DialogContent className="max-w-4xl w-full h-[90vh] flex flex-col p-0">
+          <DialogHeader className="px-5 pt-5 pb-3 border-b">
+            <DialogTitle className="flex items-center gap-2 text-sm font-semibold truncate">
+              <FileText className="w-4 h-4 text-primary flex-shrink-0" />
+              {previewJob?.fileName}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-hidden">
+            {previewJob?.fileUrl && (
+              <iframe
+                src={previewJob.fileUrl}
+                className="w-full h-full border-0"
+                title={previewJob.fileName}
+              />
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+      </>)}
+    </div>
+  );
+};
+
+export default PrintDashboard;
