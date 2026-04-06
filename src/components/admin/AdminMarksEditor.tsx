@@ -15,11 +15,23 @@ interface AdminMarksEditorProps {
   maxMarks: number;
 }
 
+type RecordedMark = {
+  id: string;
+  subjectId: string;
+  subjectName: string;
+  subjectCode: string;
+  testNumber: string;
+  score: number;
+  maxMarks: number;
+  remarks: string;
+  date: string;
+};
+
 export const AdminMarksEditor = ({ type, title, maxMarks }: AdminMarksEditorProps) => {
   const { selectedStudent } = useAuth();
   const { toast } = useToast();
   const [subjects, setSubjects] = useState<Array<{ id: string; code: string; name: string }>>([])
-  const [marks, setMarks] = useState<Array<{ subjectId: string; subjectName: string; subjectCode: string; score: number; maxMarks: number; remarks: string; date: string }>>([])
+  const [marks, setMarks] = useState<RecordedMark[]>([])
   const [selectedSubject, setSelectedSubject] = useState("");
   const [testNumber, setTestNumber] = useState("1");
   const [score, setScore] = useState("");
@@ -89,7 +101,7 @@ export const AdminMarksEditor = ({ type, title, maxMarks }: AdminMarksEditorProp
 
     try {
       const subject = subjects.find(s => s.id === selectedSubject);
-      const newMark = {
+      const newMark: RecordedMark = {
         id: Date.now().toString(),
         subjectId: selectedSubject,
         subjectName: subject.name,
