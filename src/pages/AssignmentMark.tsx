@@ -8,7 +8,7 @@ import { supabase } from "@/lib/supabase";
 
 const AssignmentMark = () => {
   const { isAdmin, user, selectedStudent } = useAuth();
-  const [marks, setMarks] = useState<Array<{ subjectId: string; subjectName: string; subjectCode: string; score: number; maxMarks: number; remarks: string; date: string }>>([]);;
+  const [marks, setMarks] = useState<Array<{ id: string; subjectId: string; subjectName: string; subjectCode: string; score: number; maxMarks: number; remarks: string; date: string; assignmentTitle: string }>>([]);
 
   useEffect(() => {
     loadMarks();
@@ -32,12 +32,59 @@ const AssignmentMark = () => {
       }
 
       if (studentId) {
-        const saved = localStorage.getItem(`assignment_marks_${studentId}`);
-        if (saved) {
-          setMarks(JSON.parse(saved));
-        } else {
-          setMarks([]);
+        const { data, error } = await supabase
+          .from("assignment_submissions")
+          .select(`
+            id,
+            student_id,
+            marks_obtained,
+            feedback,
+            graded_at,
+            created_at,
+            assignments (
+              subject_id,
+              title,
+              max_marks,
+              subjects (
+                name,
+                code
+              )
+            )
+          `)
+          .eq("student_id", studentId)
+          .not("marks_obtained", "is", null)
+          .order("graded_at", { ascending: false, nullsFirst: false });
+
+        if (error) {
+          throw error;
         }
+
+        const parsed = (data || [])
+          .map((row: any) => {
+            const assignment = row.assignments;
+            const subject = assignment?.subjects;
+
+            if (!assignment?.subject_id || typeof row.marks_obtained !== "number") {
+              return null;
+            }
+
+            return {
+              id: row.id,
+              subjectId: assignment.subject_id,
+              subjectName: subject?.name || "Unknown Subject",
+              subjectCode: subject?.code || "N/A",
+              score: Number(row.marks_obtained),
+              maxMarks: Number(assignment?.max_marks || 10),
+              remarks: row.feedback || "",
+              date: row.graded_at || row.created_at || new Date().toISOString(),
+              assignmentTitle: assignment?.title || "Assignment",
+            };
+          })
+          .filter(Boolean);
+
+        setMarks(parsed);
+      } else {
+        setMarks([]);
       }
     } catch (error) {
       console.error('Error loading Assignment marks:', error);
@@ -55,7 +102,7 @@ const AssignmentMark = () => {
     }
     acc[key].marks.push(mark);
     return acc;
-  }, {} as Record<string, { subjectName: string; subjectCode: string; marks: Array<{ score: number; maxMarks: number; remarks: string; date: string }> }>);;
+  }, {} as Record<string, { subjectName: string; subjectCode: string; marks: Array<{ id: string; score: number; maxMarks: number; remarks: string; date: string; assignmentTitle: string }> }>);
 
   const calculateAverage = (marks: Array<{ score: number; maxMarks: number }>) => {
     if (marks.length === 0) return 0;
@@ -142,11 +189,11 @@ const AssignmentMark = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {subject.marks.map((mark: { subjectName: string; subjectCode: string; score: number; maxMarks: number; remarks: string; date: string }, index: number) => {
+                  {subject.marks.map((mark: { id: string; score: number; maxMarks: number; remarks: string; date: string; assignmentTitle: string }, index: number) => {
                     const percentage = Math.round((mark.score / mark.maxMarks) * 100);
                     return (
-                      <tr key={index}>
-                        <td className="font-medium">Assignment {mark.testNumber}</td>
+                      <tr key={mark.id || index}>
+                        <td className="font-medium">{mark.assignmentTitle || `Assignment ${index + 1}`}</td>
                         <td className="text-center">
                           <span className={`font-bold ${
                             percentage >= 90 ? "text-success" :
@@ -174,7 +221,7 @@ const AssignmentMark = () => {
                           </div>
                         </td>
                         <td className="text-muted-foreground">{mark.remarks || '-'}</td>
-                        <td className="text-muted-foreground">{new Date(mark.addedAt).toLocaleDateString()}</td>
+                        <td className="text-muted-foreground">{new Date(mark.date).toLocaleDateString()}</td>
                       </tr>
                     );
                   })}
