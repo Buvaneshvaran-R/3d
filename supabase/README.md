@@ -118,6 +118,21 @@ Go to: **Supabase Dashboard** → **SQL Editor** → **New Query**
 - Performance monitoring
 
 ---
+
+### **9. Moodle Assignments Upgrade** ⭐ **NEW**
+**File:** `21_moodle_assignments.sql`
+
+- Adds assignment question attachment support
+- Adds student submission text + file support
+- Adds teacher grading workflow fields and policies
+- Creates secure `moodle-assignments` storage bucket
+
+**What it enables:**
+- Teacher can create assignments with deadlines and optional question files
+- Student can upload assignment responses from Moodle page
+- Teacher can view all submissions and grade in the same screen
+
+---
 - Student submits → Admin sees instantly
 - Estimated time: 5 seconds
 
