@@ -367,29 +367,54 @@ const Moodle = () => {
     try {
       let currentStudentId: string | null = null;
       let allowedSubjectIds: string[] = [];
+      let effectiveStudentYear: number | null = null;
+      let effectiveStudentSection = "";
+      let effectiveStudentDepartment = "";
 
       if (!adminView) {
-        const { data: studentRow, error: studentError } = await supabase
-          .from("students")
-          .select("id, current_year, semester, section, department")
-          .eq("user_id", user.id)
-          .single();
+        const [studentIdRpc, studentYearRpc, studentSectionRpc, studentDepartmentRpc] = await Promise.all([
+          supabase.rpc("get_student_id"),
+          supabase.rpc("get_student_current_year"),
+          supabase.rpc("get_student_section"),
+          supabase.rpc("get_student_department"),
+        ]);
 
-        if (studentError || !studentRow?.id) {
-          throw studentError || new Error("Student profile not found.");
+        currentStudentId = (studentIdRpc.data as string) || null;
+        effectiveStudentYear = typeof studentYearRpc.data === "number" ? studentYearRpc.data : null;
+        effectiveStudentSection = String(studentSectionRpc.data || "").toUpperCase();
+        effectiveStudentDepartment = String(studentDepartmentRpc.data || "").toUpperCase();
+
+        // Fallback when RPC helpers are not available.
+        if (!currentStudentId) {
+          const { data: studentRow, error: studentError } = await supabase
+            .from("students")
+            .select("id, current_year, semester, section, department")
+            .eq("user_id", user.id)
+            .single();
+
+          if (studentError || !studentRow?.id) {
+            throw studentError || new Error("Student profile not found.");
+          }
+
+          currentStudentId = studentRow.id;
+          effectiveStudentYear = deriveAcademicYear(studentRow.current_year, studentRow.semester);
+          effectiveStudentSection = (studentRow.section || "").toUpperCase();
+          effectiveStudentDepartment = (studentRow.department || "").toUpperCase();
         }
 
-        currentStudentId = studentRow.id;
-        setStudentId(studentRow.id);
-        const derivedYear = deriveAcademicYear(studentRow.current_year, studentRow.semester);
-        setStudentYear(derivedYear);
-        setStudentSection((studentRow.section || "").toUpperCase());
-        setStudentDepartment((studentRow.department || "").toUpperCase());
+        if (!currentStudentId) {
+          throw new Error("Student profile not found.");
+        }
+
+        setStudentId(currentStudentId);
+        setStudentYear(effectiveStudentYear);
+        setStudentSection(effectiveStudentSection);
+        setStudentDepartment(effectiveStudentDepartment);
 
         const { data: links, error: linksError } = await supabase
           .from("student_subjects")
           .select("subject_id")
-          .eq("student_id", studentRow.id);
+          .eq("student_id", currentStudentId);
 
         if (linksError) {
           throw linksError;
@@ -492,14 +517,14 @@ const Moodle = () => {
       const visibleAssignments = adminView
         ? mappedAssignments
         : mappedAssignments.filter((assignment) => {
-            const yearMatch = assignment.targetYear == null || assignment.targetYear === studentYear;
+            const yearMatch = assignment.targetYear == null || assignment.targetYear === effectiveStudentYear;
 
             const sectionTarget = normalizeSection(assignment.targetSection);
-            const studentSectionValue = normalizeSection(studentSection);
+            const studentSectionValue = normalizeSection(effectiveStudentSection);
             const sectionMatch = sectionTarget === "" || sectionTarget === "ALL" || sectionTarget === studentSectionValue;
 
             const departmentTarget = normalizeDepartment(assignment.targetDepartment);
-            const studentDepartmentValue = normalizeDepartment(studentDepartment);
+            const studentDepartmentValue = normalizeDepartment(effectiveStudentDepartment);
             const departmentMatch = isOpenTarget(assignment.targetDepartment)
               || departmentTarget === studentDepartmentValue;
 
@@ -786,6 +811,15 @@ const Moodle = () => {
     const draft = submissionDrafts[assignment.id] || { text: "", file: null };
     const existing = assignment.submissions[0] || null;
 
+    if (existing?.gradedAt) {
+      toast({
+        title: "Submission locked",
+        description: "This assignment is already graded and moved to Completed Assignments.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     if (!draft.text.trim() && !draft.file && !existing?.filePath) {
       toast({
         title: "Nothing to submit",
@@ -936,6 +970,16 @@ const Moodle = () => {
       overdue: false,
     };
   };
+
+  const studentPendingAssignments = adminView
+    ? []
+    : assignments.filter((assignment) => !assignment.submissions[0]?.gradedAt);
+
+  const studentCompletedAssignments = adminView
+    ? []
+    : assignments.filter((assignment) => Boolean(assignment.submissions[0]?.gradedAt));
+
+  const visibleAssignments = adminView ? assignments : studentPendingAssignments;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -1227,12 +1271,12 @@ const Moodle = () => {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <FileText className="w-5 h-5 text-primary" />
-              Assignments
+              {adminView ? "Assignments" : "Pending Assignments"}
             </CardTitle>
             <CardDescription>
               {adminView
                 ? "Review student submissions and grade directly from this page."
-                : `Submit your responses as ${currentUserName}${studentDepartment || studentYear ? ` (${studentDepartment || "Unknown Dept"}${studentYear ? `, Year ${studentYear}` : ""}${studentSection ? `, Section ${studentSection}` : ""})` : ""}.`}
+                : `Submit your responses as ${currentUserName}${studentDepartment || studentYear ? ` (${studentDepartment || "Unknown Dept"}${studentYear ? `, Year ${studentYear}` : ""}${studentSection ? `, Section ${studentSection}` : ""})` : ""}. Once graded, submissions move to Completed Assignments and cannot be changed.`}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -1240,10 +1284,11 @@ const Moodle = () => {
               <div className="rounded-xl border border-dashed p-8 text-center text-muted-foreground">
                 Loading assignments...
               </div>
-            ) : assignments.length > 0 ? (
-              assignments.map((assignment) => {
+            ) : visibleAssignments.length > 0 ? (
+              visibleAssignments.map((assignment) => {
                 const deadline = getDeadlineMeta(assignment.dueDate);
                 const mySubmission = !adminView ? assignment.submissions[0] : null;
+                const submissionLocked = Boolean(mySubmission?.gradedAt);
 
                 return (
                   <div key={assignment.id} className="rounded-xl border bg-muted/20 p-4 space-y-4">
@@ -1313,6 +1358,7 @@ const Moodle = () => {
                         <Textarea
                           placeholder="Write your answer or short notes"
                           value={submissionDrafts[assignment.id]?.text || ""}
+                          disabled={submissionLocked}
                           onChange={(event) =>
                             setSubmissionDrafts((current) => ({
                               ...current,
@@ -1328,6 +1374,7 @@ const Moodle = () => {
                           <label className="text-sm font-medium">Upload file (optional)</label>
                           <Input
                             type="file"
+                            disabled={submissionLocked}
                             onChange={(event) =>
                               setSubmissionDrafts((current) => ({
                                 ...current,
@@ -1369,12 +1416,14 @@ const Moodle = () => {
                         <Button
                           type="button"
                           className="gap-2"
-                          disabled={submittingAssignmentId === assignment.id}
+                          disabled={submissionLocked || submittingAssignmentId === assignment.id}
                           onClick={() => handleSubmitAssignment(assignment)}
                         >
                           <Upload className="w-4 h-4" />
                           {submittingAssignmentId === assignment.id
                             ? "Submitting..."
+                            : submissionLocked
+                              ? "Submission Locked"
                             : mySubmission
                               ? "Update Submission"
                               : "Submit Assignment"}
@@ -1485,11 +1534,95 @@ const Moodle = () => {
               })
             ) : (
               <div className="rounded-xl border border-dashed p-8 text-center text-muted-foreground">
-                No assignments available right now.
+                {adminView ? "No assignments available right now." : "No pending assignments right now."}
               </div>
             )}
           </CardContent>
         </Card>
+
+        {!adminView && !loadingAssignments && (
+          <Card className="border-none shadow-card">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <CheckCircle2 className="w-5 h-5 text-primary" />
+                Completed Assignments
+              </CardTitle>
+              <CardDescription>
+                Graded submissions are read-only and shown here.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {studentCompletedAssignments.length > 0 ? (
+                studentCompletedAssignments.map((assignment) => {
+                  const submission = assignment.submissions[0];
+                  return (
+                    <div key={assignment.id} className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div className="flex flex-wrap gap-2">
+                            <Badge variant="secondary">{assignment.subjectName}</Badge>
+                            <Badge variant="outline">{assignment.subjectCode}</Badge>
+                            <Badge variant="secondary" className="gap-1">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              Completed
+                            </Badge>
+                          </div>
+                          <h3 className="mt-2 font-semibold">{assignment.title}</h3>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Graded {submission?.gradedAt ? new Date(submission.gradedAt).toLocaleString() : "-"}
+                        </p>
+                      </div>
+
+                      {submission?.submissionText && (
+                        <p className="text-sm whitespace-pre-line">{submission.submissionText}</p>
+                      )}
+
+                      <div className="rounded-md border bg-background p-3 text-sm space-y-1">
+                        <p>
+                          <span className="font-medium">Grade:</span>{" "}
+                          {submission?.marksObtained == null ? "Not set" : `${submission.marksObtained}/${assignment.maxMarks}`}
+                        </p>
+                        <p>
+                          <span className="font-medium">Feedback:</span> {submission?.feedback || "No feedback yet"}
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap gap-3">
+                        {assignment.attachmentPath && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="h-9 gap-2"
+                            onClick={() => openAssignmentFile(assignment.attachmentPath)}
+                          >
+                            <Download className="w-4 h-4" />
+                            {assignment.attachmentName || "Question File"}
+                          </Button>
+                        )}
+                        {submission?.filePath && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="h-9 gap-2"
+                            onClick={() => openAssignmentFile(submission.filePath)}
+                          >
+                            <Download className="w-4 h-4" />
+                            {submission.fileName || "Submitted File"}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="rounded-xl border border-dashed p-8 text-center text-muted-foreground">
+                  No completed assignments yet.
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
       </div>
       )}
 
