@@ -53,6 +53,7 @@ interface PrintJob {
   amount: number;
   status: string;
   submittedAt: string;
+  completedAt?: string;
   fileUrl?: string;
   studentEmail?: string;
   isPriority?: boolean;
@@ -83,6 +84,7 @@ function dbToJob(row: { [key: string]: any }): PrintJob {
     amount: row.amount,
     status: row.status,
     submittedAt: row.submitted_at,
+    completedAt: row.completed_at ?? undefined,
     fileUrl: row.file_url ?? undefined,
     studentEmail: row.student_email ?? undefined,
     isPriority: row.is_priority ?? false,
@@ -268,26 +270,35 @@ const JobDetailDialog = ({
 
           {/* Reject section */}
           {job.status === "queued" && showReject && (
-            <div className="space-y-2">
-              <p className="text-xs font-semibold text-red-600">Reason for rejection</p>
+            <div className="space-y-2 p-4 bg-red-50 border-2 border-red-200 rounded-lg">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-bold text-red-600">Reason for rejection</p>
+                <span className="text-xs font-semibold text-red-600 bg-red-100 px-2 py-0.5 rounded">REQUIRED</span>
+              </div>
               <Textarea
-                placeholder="e.g. File is corrupted, unsupported format…"
+                placeholder="Please explain why this job is being rejected (e.g., File is corrupted, unsupported format, exceeds page limit, etc.)"
                 value={rejectReason}
                 onChange={(e) => setRejectReason(e.target.value)}
-                className="text-sm resize-none"
-                rows={3}
+                className="text-sm resize-none border-red-300 focus:border-red-500 focus:ring-red-500"
+                rows={4}
+                autoFocus
               />
+              {!rejectReason.trim() && (
+                <p className="text-xs text-red-600">
+                  ⚠️ You must provide a reason before rejecting this job
+                </p>
+              )}
               <div className="flex gap-2">
-                <Button variant="outline" size="sm" className="flex-1" onClick={() => setShowReject(false)}>
+                <Button variant="outline" size="sm" className="flex-1" onClick={() => {setShowReject(false); setRejectReason("");}}>
                   Cancel
                 </Button>
                 <Button
                   size="sm"
-                  className="flex-1 bg-red-600 hover:bg-red-700 text-white"
+                  className="flex-1 bg-red-600 hover:bg-red-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
                   disabled={!rejectReason.trim()}
                   onClick={handleRejectSubmit}
                 >
-                  Confirm Reject
+                  {!rejectReason.trim() ? "Enter Reason First" : "Confirm Reject"}
                 </Button>
               </div>
             </div>
@@ -296,12 +307,7 @@ const JobDetailDialog = ({
 
         {/* Action buttons */}
         <div className="px-5 pb-5 pt-3 border-t border-border space-y-2">
-          {!isFirstInQueue ? (
-            <div className="w-full h-11 flex items-center justify-center rounded-lg bg-orange-50 border border-orange-200 text-orange-600 text-sm font-semibold gap-2">
-              <Clock className="w-4 h-4 flex-shrink-0" />
-              Job #{firstJobQueueNo} is still pending
-            </div>
-          ) : job.fileUrl ? (
+          {job.fileUrl ? (
             <Button
               className="w-full gap-2 h-11 text-sm font-semibold"
               onClick={handleDownload}
@@ -314,6 +320,13 @@ const JobDetailDialog = ({
             <div className="w-full h-11 flex items-center justify-center rounded-lg bg-muted text-muted-foreground text-sm gap-2">
               <Download className="w-4 h-4" />
               No file attached
+            </div>
+          )}
+
+          {job.status === "queued" && !isFirstInQueue && (
+            <div className="w-full h-9 flex items-center justify-center rounded-lg bg-orange-50 border border-orange-200 text-orange-600 text-xs font-semibold gap-1.5">
+              <Clock className="w-3.5 h-3.5 flex-shrink-0" />
+              Note: Job #{firstJobQueueNo} is ahead in queue
             </div>
           )}
 
@@ -398,29 +411,90 @@ const PrintKeeperPortal = () => {
     });
 
   const completedJobs = jobs
-    .filter((j) => j.status === "completed")
+    .filter((j) => {
+      if (j.status !== "completed") return false;
+      
+      // Hide completed jobs older than 24 hours
+      const twentyFourHoursAgo = Date.now() - (24 * 60 * 60 * 1000);
+      const completedTime = new Date(j.completedAt || j.submittedAt).getTime();
+      
+      return completedTime > twentyFourHoursAgo;
+    })
     .sort((a, b) => b.queueNo - a.queueNo);
 
   const totalPagesHandled = completedJobs.reduce((s, j) => s + j.pages * j.copies, 0);
 
   const handleMarkDone = async (jobId: string) => {
-    const { error } = await supabase
-      .from("print_jobs")
-      .update({ status: "completed" })
-      .eq("id", jobId);
-    if (!error) {
-      setJobs((prev) => prev.map((j) => j.id === jobId ? { ...j, status: "completed" } : j));
+    try {
+      const now = new Date().toISOString();
+      console.log('Marking job as done:', jobId, 'at', now);
+      
+      // First try with completed_at column (if migration was run)
+      let { data, error } = await supabase
+        .from("print_jobs")
+        .update({ status: "completed", completed_at: now })
+        .eq("id", jobId)
+        .select();
+      
+      // If error mentions "completed_at" column doesn't exist, try without it
+      if (error && error.message?.includes('completed_at')) {
+        console.warn('completed_at column not found, updating without it. Run migration: supabase/22_print_jobs_completed_at.sql');
+        const fallback = await supabase
+          .from("print_jobs")
+          .update({ status: "completed" })
+          .eq("id", jobId)
+          .select();
+        data = fallback.data;
+        error = fallback.error;
+      }
+      
+      if (error) {
+        console.error('Failed to mark job as done:', error);
+        alert(`Failed to update job: ${error.message}\n\nPossible causes:\n- RLS policies blocking updates\n- Not logged in as admin\n- Network issue\n\nCheck browser console for details.`);
+        return;
+      }
+      
+      if (!data || data.length === 0) {
+        console.error('No data returned after update, job may not exist:', jobId);
+        alert('Job update returned no data. The job may have been deleted.');
+        return;
+      }
+      
+      console.log('Job marked as done successfully:', data);
+      setJobs((prev) => prev.map((j) => j.id === jobId ? { ...j, status: "completed", completedAt: now } : j));
       setDownloadedJobs((prev) => { const s = new Set(prev); s.delete(jobId); return s; });
+    } catch (err) {
+      console.error('Exception while marking job as done:', err);
+      alert('An error occurred while updating the job. Check the console for details.');
     }
   };
 
   const handleReject = async (jobId: string, reason: string) => {
-    const { error } = await supabase
-      .from("print_jobs")
-      .update({ status: "cancelled", rejection_reason: reason })
-      .eq("id", jobId);
-    if (!error) {
+    try {
+      console.log('Rejecting job:', jobId, 'with reason:', reason);
+      const { data, error } = await supabase
+        .from("print_jobs")
+        .update({ status: "cancelled", rejection_reason: reason })
+        .eq("id", jobId)
+        .select();
+      
+      if (error) {
+        console.error('Failed to reject job:', error);
+        alert(`Failed to reject job: ${error.message}`);
+        return;
+      }
+      
+      if (!data || data.length === 0) {
+        console.error('No data returned after reject update');
+        alert('Job reject returned no data.');
+        return;
+      }
+      
+      console.log('Job rejected successfully:', data);
       setJobs((prev) => prev.map((j) => j.id === jobId ? { ...j, status: "cancelled" } : j));
+    } catch (err) {
+      console.error('Exception while rejecting job:', err);
+      alert('An error occurred while rejecting the job.');
     }
   };
 
@@ -614,7 +688,7 @@ const PrintKeeperPortal = () => {
                         <span className="font-semibold text-primary">₹{job.amount}</span>
                       </TableCell>
                       <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                        {downloadedJobs.has(job.id) && pendingJobs[0]?.id === job.id && (
+                        {downloadedJobs.has(job.id) && (
                           <Button
                             size="sm"
                             className="h-7 text-xs px-3 gap-1 bg-green-600 hover:bg-green-700 text-white"
