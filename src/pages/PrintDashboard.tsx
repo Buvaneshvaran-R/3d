@@ -75,6 +75,7 @@ interface PrintJob {
   paymentId?: string;
   fileUrl?: string;
   studentEmail?: string;
+  rejectionReason?: string;
 }
 
 interface FileEntry {
@@ -194,6 +195,7 @@ function dbToJob(row: { [key: string]: any }): PrintJob {
     paymentId: row.payment_id ?? undefined,
     fileUrl: row.file_url ?? undefined,
     studentEmail: row.student_email ?? undefined,
+    rejectionReason: row.rejection_reason ?? undefined,
   };
 }
 
@@ -529,25 +531,35 @@ const UploadForm = ({ onSubmit, submitterName, rollNo }: UploadFormProps) => {
       binding: "none" as PrintBinding,
     }));
     setEntries((prev) => [...prev, ...newEntries]);
-    // auto-detect pages for PDFs
+    // auto-detect pages for PDFs asynchronously to avoid blocking UI
     newEntries.forEach((entry) => {
       if (entry.file.name.split(".").pop()?.toLowerCase() !== "pdf") return;
+      
+      // Skip page detection for very large files (>50MB) to prevent UI blocking
+      if (entry.file.size > 50_000_000) {
+        console.log(`Skipping page detection for large file: ${entry.file.name}`);
+        return;
+      }
+      
       const reader = new FileReader();
       reader.onload = (e) => {
-        const content = e.target?.result as string;
-        const matches = [...content.matchAll(/\/Count\s+(\d+)/g)];
-        if (matches.length > 0) {
-          const total = Math.max(...matches.map((m) => parseInt(m[1])));
-          if (total > 0) {
-            setEntries((prev) =>
-              prev.map((en) =>
-                en.id === entry.id
-                  ? { ...en, detectedPages: total, pagesInput: `1-${total}` }
-                  : en
-              )
-            );
+        // Use setTimeout to avoid blocking the main thread
+        setTimeout(() => {
+          const content = e.target?.result as string;
+          const matches = [...content.matchAll(/\/Count\s+(\d+)/g)];
+          if (matches.length > 0) {
+            const total = Math.max(...matches.map((m) => parseInt(m[1])));
+            if (total > 0) {
+              setEntries((prev) =>
+                prev.map((en) =>
+                  en.id === entry.id
+                    ? { ...en, detectedPages: total, pagesInput: `1-${total}` }
+                    : en
+                )
+              );
+            }
           }
-        }
+        }, 0);
       };
       reader.readAsBinaryString(entry.file);
     });
@@ -910,20 +922,20 @@ const PrintDashboard = () => {
     .filter((j) => j.status !== "pending_payment" && j.status !== "cancelled")
     .reduce((s, j) => s + j.pages * j.copies, 0);
 
-  // each user sees only their own jobs
+  // each user sees only their own jobs (including cancelled to see rejection reasons)
   const visibleJobs = myJobs
-    .filter((j) => j.status !== "pending_payment" && j.status !== "cancelled")
+    .filter((j) => j.status !== "pending_payment")
     .filter((j) => statusFilter === "all" || j.status === statusFilter)
     .sort((a, b) => a.queueNo - b.queueNo);
 
   const handleUploadSubmit = async (
     items: Array<{ job: Omit<PrintJob, "id" | "queueNo" | "status" | "submittedAt">; file: File }>
   ) => {
-    const newJobs: PrintJob[] = [];
-    for (const { job: jobData, file } of items) {
+    // Parallelize file uploads and database inserts for faster processing
+    const uploadPromises = items.map(async ({ job: jobData, file }, index) => {
       // Upload file to Supabase storage
       const safeFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const filePath = `${Date.now()}_${safeFileName}`;
+      const filePath = `${Date.now()}_${index}_${safeFileName}`;
       let fileUrl: string | undefined;
       const { error: uploadError } = await supabase.storage
         .from("print-files")
@@ -937,7 +949,7 @@ const PrintDashboard = () => {
         fileUrl = urlData.publicUrl;
       }
 
-      const queueNo = jobs.length + newJobs.length + 1;
+      const queueNo = jobs.length + index + 1;
       const { data, error } = await supabase
         .from("print_jobs")
         .insert({
@@ -960,10 +972,14 @@ const PrintDashboard = () => {
         })
         .select()
         .single();
-      if (!error && data) {
-        newJobs.push(dbToJob(data));
-      }
-    }
+      
+      return !error && data ? dbToJob(data) : null;
+    });
+
+    // Wait for all uploads to complete in parallel
+    const results = await Promise.all(uploadPromises);
+    const newJobs = results.filter((job): job is PrintJob => job !== null);
+    
     if (newJobs.length) {
       setJobs((prev) => [...prev, ...newJobs]);
       setPendingJobs(newJobs);
@@ -973,19 +989,22 @@ const PrintDashboard = () => {
 
   const handlePaymentConfirm = async (jobIds: string[]) => {
     const paymentId = `pay_${Math.random().toString(36).slice(2, 10)}`;
-    for (const jobId of jobIds) {
-      const { error } = await supabase
-        .from("print_jobs")
-        .update({ status: "queued", payment_id: paymentId })
-        .eq("id", jobId);
-      if (!error) {
-        setJobs((prev) =>
-          prev.map((j) =>
-            j.id === jobId ? { ...j, status: "queued", paymentId } : j
-          )
-        );
-      }
+    
+    // Batch update all jobs in a single query for better performance
+    const { error } = await supabase
+      .from("print_jobs")
+      .update({ status: "queued", payment_id: paymentId })
+      .in("id", jobIds);
+    
+    if (!error) {
+      // Single state update instead of multiple updates in a loop
+      setJobs((prev) =>
+        prev.map((j) =>
+          jobIds.includes(j.id) ? { ...j, status: "queued", paymentId } : j
+        )
+      );
     }
+    
     setShowPayment(false);
     setPendingJobs([]);
   };
@@ -1192,7 +1211,14 @@ const PrintDashboard = () => {
                             <span className="font-semibold text-primary">₹{job.amount}</span>
                           </TableCell>
                           <TableCell>
-                            <StatusBadge status={job.status} />
+                            <div className="space-y-1">
+                              <StatusBadge status={job.status} />
+                              {job.status === "cancelled" && job.rejectionReason && (
+                                <p className="text-xs text-red-600 italic mt-1 max-w-[200px]">
+                                  Reason: {job.rejectionReason}
+                                </p>
+                              )}
+                            </div>
                           </TableCell>
                           {admin && (
                             <TableCell className="text-right">
@@ -1268,6 +1294,7 @@ const PrintDashboard = () => {
                 src={previewJob.fileUrl}
                 className="w-full h-full border-0"
                 title={previewJob.fileName}
+                loading="lazy"
               />
             )}
           </div>
