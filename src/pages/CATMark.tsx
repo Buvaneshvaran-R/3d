@@ -1,3 +1,4 @@
+import { StudentFinderWrapper } from "@/components/admin/StudentFinderWrapper";
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FileCheck, Award, TrendingUp, Loader2 } from "lucide-react";
@@ -81,6 +82,7 @@ const CATMark = () => {
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <StudentFinderWrapper />
       <h1 className="page-header">CAT Mark</h1>
       
       {/* Admin Editor */}

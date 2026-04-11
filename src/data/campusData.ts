@@ -9,7 +9,7 @@ const buildingA: Building = {
   id: 'A',
   name: 'Block A - Academic Building',
   type: 'academic',
-  position: { x: -45, y: 0, z: -30 },
+  position: { x: -70, y: 0, z: 0 },
   dimensions: { width: 28, depth: 18, height: 32 },
   color: { r: 0.86, g: 0.86, b: 0.86 },
   floors: [
@@ -75,9 +75,9 @@ const buildingA: Building = {
 // ─────────────────────────────────────────────────────────
 const buildingB: Building = {
   id: 'B',
-  name: 'Block B - Engineering Building',
-  type: 'academic',
-  position: { x: 0, y: 0, z: -30 },
+  name: 'Block B - Main Building',
+  type: 'main',
+  position: { x: 0, y: 0, z: 0 },
   dimensions: { width: 32, depth: 20, height: 32 },
   color: { r: 0.75, g: 0.80, b: 0.86 },
   floors: [
@@ -144,9 +144,9 @@ const buildingB: Building = {
 // ─────────────────────────────────────────────────────────
 const buildingC: Building = {
   id: 'C',
-  name: 'Block C - Administration & Library',
-  type: 'academic',
-  position: { x: 50, y: 0, z: -30 },
+  name: 'Block C - Auditorium',
+  type: 'auditorium',
+  position: { x: 70, y: 0, z: 0 },
   dimensions: { width: 24, depth: 16, height: 52 },
   color: { r: 0.80, g: 0.75, b: 0.70 },
   floors: [

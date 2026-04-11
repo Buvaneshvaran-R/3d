@@ -1,3 +1,4 @@
+import { StudentFinderWrapper } from "@/components/admin/StudentFinderWrapper";
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -152,6 +153,7 @@ const SubjectRegistration = () => {
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <StudentFinderWrapper />
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <h1 className="page-header mb-0">Subject Registration</h1>
         {registrations.length > 0 && (

@@ -1,3 +1,4 @@
+import { StudentFinderWrapper } from "@/components/admin/StudentFinderWrapper";
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { FlaskConical, Award, TrendingUp } from "lucide-react";
@@ -69,6 +70,7 @@ const LabMark = () => {
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <StudentFinderWrapper />
       <h1 className="page-header">LAB Mark</h1>
       
       {/* Admin Editor */}

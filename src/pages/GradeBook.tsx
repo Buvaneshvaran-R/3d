@@ -1,3 +1,4 @@
+import { StudentFinderWrapper } from "@/components/admin/StudentFinderWrapper";
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
@@ -5,26 +6,43 @@ import { GraduationCap, Award, TrendingUp } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/supabase";
 
+import { AdminGradeEditor } from "@/components/admin/AdminGradeEditor";
+
 const calculateGrade = (percentage: number): string => {
+  if (percentage >= 100) return "O";
   if (percentage >= 90) return "A+";
   if (percentage >= 80) return "A";
   if (percentage >= 70) return "B+";
   if (percentage >= 60) return "B";
   if (percentage >= 50) return "C";
-  return "F";
+  return "U";
+};
+
+const getGradePercentage = (grade: string): number => {
+  switch(grade) {
+    case "O": return 100;
+    case "A+": return 90;
+    case "A": return 80;
+    case "B+": return 70;
+    case "B": return 60;
+    case "C": return 50;
+    case "U": return 0;
+    default: return 0;
+  }
 };
 
 const getGradePoint = (grade: string): number => {
   const gradePoints: Record<string, number> = {
-    "A+": 10, "A": 9, "B+": 8, "B": 7, "C": 6, "F": 0
+    "O": 10, "A+": 9, "A": 8, "B+": 7, "B": 6, "C": 5, "U": 0
   };
   return gradePoints[grade] || 0;
 };
 
 const getGradeColor = (grade: string) => {
-  if (grade === "A+") return "text-success";
-  if (grade === "A") return "text-primary";
-  if (grade === "B+") return "text-warning";
+  if (grade === "O" || grade === "A+") return "text-success";
+  if (grade === "A" || grade === "B+") return "text-primary";
+  if (grade === "B" || grade === "C") return "text-warning";
+  if (grade === "U") return "text-destructive";
   return "text-muted-foreground";
 };
 
@@ -55,13 +73,56 @@ const GradeBook = () => {
 
       if (!studentId) return;
 
+      // Load explicit manual grades
+      const manualGrades = JSON.parse(localStorage.getItem(`manual_grades_${studentId}`) || '{}');
+
       // Load all marks
       const catMarks = JSON.parse(localStorage.getItem(`cat_marks_${studentId}`) || '[]');
       const labMarks = JSON.parse(localStorage.getItem(`lab_marks_${studentId}`) || '[]');
       const assignmentMarks = JSON.parse(localStorage.getItem(`assignment_marks_${studentId}`) || '[]');
 
+      // Load registered subjects first so even those without marks show up if they have a manual grade
+      let registeredSubjects: any[] = [];
+      try {
+        const { data } = await supabase
+          .from('student_subjects')
+          .select(`
+            subject_id,
+            subjects (
+              id,
+              code,
+              name
+            )
+          `)
+          .eq('student_id', studentId);
+          
+        if (data) {
+          registeredSubjects = data.map((item: any) => ({
+            subjectId: item.subject_id,
+            subjectName: item.subjects?.name,
+            subjectCode: item.subjects?.code
+          }));
+        }
+      } catch (e) {
+        console.error("Failed to load registered subjects from DB:", e);
+      }
+
       // Group by subject
-      const subjectMap: Record<string, { cat: Array<{ score: number; maxMarks: number }>; lab: Array<{ score: number; maxMarks: number }>; assignment: Array<{ score: number; maxMarks: number }>; subjectName: string; subjectCode: string }> = {};;
+      const subjectMap: Record<string, { subjectId: string; cat: Array<{ score: number; maxMarks: number }>; lab: Array<{ score: number; maxMarks: number }>; assignment: Array<{ score: number; maxMarks: number }>; subjectName: string; subjectCode: string }> = {};
+
+      registeredSubjects.forEach((sub: any) => {
+        const key = sub.subjectId;
+        if (key) {
+          subjectMap[key] = {
+            subjectId: key,
+            subjectName: sub.subjectName || sub.name,
+            subjectCode: sub.subjectCode || sub.code,
+            cat: [],
+            lab: [],
+            assignment: []
+          };
+        }
+      });
 
       [...catMarks, ...labMarks, ...assignmentMarks].forEach(mark => {
         const key = mark.subjectId;
@@ -99,7 +160,10 @@ const GradeBook = () => {
 
         // Weighted calculation: CAT 40%, Lab 30%, Assignment 30%
         const total = (catAvg * 0.4) + (labAvg * 0.3) + (assignmentAvg * 0.3);
-        const grade = calculateGrade(total);
+        
+        const manualGrade = manualGrades[subject.subjectId];
+        const grade = manualGrade || calculateGrade(total);
+        const displayTotal = manualGrade ? getGradePercentage(manualGrade) : total;
         const gradePoint = getGradePoint(grade);
 
         return {
@@ -107,7 +171,7 @@ const GradeBook = () => {
           catAvg: Math.round(catAvg),
           labAvg: Math.round(labAvg),
           assignmentAvg: Math.round(assignmentAvg),
-          total: Math.round(total),
+          total: Math.round(displayTotal),
           grade,
           gradePoint
         };
@@ -129,7 +193,12 @@ const GradeBook = () => {
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <StudentFinderWrapper />
       <h1 className="page-header">Grade Book</h1>
+
+      {isAdmin() && selectedStudent && (
+        <AdminGradeEditor />
+      )}
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

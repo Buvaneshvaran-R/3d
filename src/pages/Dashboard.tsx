@@ -37,17 +37,11 @@ const statCards: Array<{
   trend: string;
 }> = [];
 
-const upcomingEvents: Array<{
-  title: string;
-  date: string;
-  time: string;
-}> = [];
-
-const recentGrades: Array<{
-  subject: string;
-  grade: string;
-  marks: number;
-}> = [];
+interface Achievement {
+  id: string;
+  event_name: string;
+  achievement_type: string;
+}
 
 const Dashboard = () => {
   const { role, isAdmin, user } = useAuth();
@@ -67,9 +61,17 @@ const Dashboard = () => {
     cgpa: number;
     published: boolean;
   }>>(new Map());
+  const [achievements, setAchievements] = useState<Achievement[]>([]);
+  const [recentGrades, setRecentGrades] = useState<Array<{
+    subject: string;
+    grade: string;
+    marks: number;
+  }>>([]);
 
   // Load student data
   useEffect(() => {
+    let intervalId: any;
+
     const loadStudentData = async () => {
       if (!isAdmin() && user?.id) {
         try {
@@ -93,6 +95,12 @@ const Dashboard = () => {
             
             // Load semester records
             loadSemesterRecords(data.id);
+            loadAchievements(data.id);
+            loadRecentGrades(data.id);
+
+            // Poll for grades updates from localStorage every 3 seconds
+            clearInterval(intervalId);
+            intervalId = setInterval(() => loadRecentGrades(data.id), 3000);
           }
         } catch (error) {
           console.error('Error loading student data:', error);
@@ -126,7 +134,138 @@ const Dashboard = () => {
       }
     };
 
-    loadStudentData();
+    const loadAchievements = async (studentId: string) => {
+      try {
+        const { data, error } = await supabase
+          .from('achievements')
+          .select('id, event_name, achievement_type')
+          .eq('student_id', studentId)
+          .order('created_at', { ascending: false })
+          .limit(3);
+
+        if (error) throw error;
+        setAchievements(data || []);
+      } catch (error) {
+        console.error('Error loading achievements:', error);
+      }
+    };
+
+    const calculateGrade = (percentage: number): string => {
+      if (percentage >= 100) return "O";
+      if (percentage >= 90) return "A+";
+      if (percentage >= 80) return "A";
+      if (percentage >= 70) return "B+";
+      if (percentage >= 60) return "B";
+      if (percentage >= 50) return "C";
+      return "U";
+    };
+
+    const getGradePercentage = (grade: string): number => {
+      switch(grade) {
+        case "O": return 100;
+        case "A+": return 90;
+        case "A": return 80;
+        case "B+": return 70;
+        case "B": return 60;
+        case "C": return 50;
+        case "U": return 0;
+        default: return 0;
+      }
+    };
+
+    const loadRecentGrades = async (studentId: string) => {
+      try {
+        const manualGrades = JSON.parse(localStorage.getItem(`manual_grades_${studentId}`) || '{}');
+        const catMarks = JSON.parse(localStorage.getItem(`cat_marks_${studentId}`) || '[]');
+        const labMarks = JSON.parse(localStorage.getItem(`lab_marks_${studentId}`) || '[]');
+        const assignmentMarks = JSON.parse(localStorage.getItem(`assignment_marks_${studentId}`) || '[]');
+        
+        let registeredSubjects: any[] = [];
+        try {
+          const { data } = await supabase
+            .from('student_subjects')
+            .select(`
+              subject_id,
+              subjects (
+                id,
+                code,
+                name
+              )
+            `)
+            .eq('student_id', studentId);
+            
+          if (data) {
+            registeredSubjects = data.map((item: any) => ({
+              subjectId: item.subject_id,
+              subjectName: item.subjects?.name,
+              subjectCode: item.subjects?.code
+            }));
+          }
+        } catch (e) {
+          console.error("Failed to load registered subjects from DB:", e);
+        }
+
+        const subjectMap: Record<string, any> = {};
+
+        // Load registered subjects first so they populate the map
+        registeredSubjects.forEach((sub: any) => {
+          const key = sub.subjectId;
+          if (key) {
+            subjectMap[key] = {
+              subjectId: key,
+              subjectName: sub.subjectName || sub.name,
+              cat: [],
+              lab: [],
+              assignment: []
+            };
+          }
+        });
+
+        [...catMarks, ...labMarks, ...assignmentMarks].forEach(mark => {
+          const key = mark.subjectId;
+          if (!subjectMap[key]) {
+            subjectMap[key] = {
+              subjectId: mark.subjectId,
+              subjectName: mark.subjectName,
+              cat: [],
+              lab: [],
+              assignment: []
+            };
+          }
+          if (catMarks.some((m: any) => m.id === mark.id && m.subjectId === mark.subjectId)) {
+            subjectMap[key].cat.push(mark);
+          } else if (labMarks.some((m: any) => m.id === mark.id && m.subjectId === mark.subjectId)) {
+            subjectMap[key].lab.push(mark);
+          } else if (assignmentMarks.some((m: any) => m.id === mark.id && m.subjectId === mark.subjectId)) {
+            subjectMap[key].assignment.push(mark);
+          }
+        });
+
+        const grades = Object.values(subjectMap).map((subject: any) => {
+          const catAvg = subject.cat.length > 0 ? subject.cat.reduce((acc: number, m: any) => acc + (m.score / m.maxMarks) * 100, 0) / subject.cat.length : 0;
+          const labAvg = subject.lab.length > 0 ? subject.lab.reduce((acc: number, m: any) => acc + (m.score / m.maxMarks) * 100, 0) / subject.lab.length : 0;
+          const assignmentAvg = subject.assignment.length > 0 ? subject.assignment.reduce((acc: number, m: any) => acc + (m.score / m.maxMarks) * 100, 0) / subject.assignment.length : 0;
+
+          const total = (catAvg * 0.4) + (labAvg * 0.3) + (assignmentAvg * 0.3);
+          
+          const manualGrade = manualGrades[subject.subjectId];
+
+          return {
+            subject: subject.subjectName,
+            grade: manualGrade || calculateGrade(total),
+            marks: manualGrade ? getGradePercentage(manualGrade) : Math.round(total),
+            isManual: !!manualGrade
+          };
+        });
+
+        // Filter out subjects with 0 marks if they haven't started grading
+        const recent = grades.filter((g: any) => g.marks > 0 || g.isManual).slice(0, 3);
+        setRecentGrades(recent);
+      } catch (error) {
+        console.error('Error loading grades:', error);
+      }
+    };
+
     loadStudentData();
 
     // Set up real-time subscription
@@ -148,9 +287,14 @@ const Dashboard = () => {
         .subscribe();
 
       return () => {
+        clearInterval(intervalId);
         supabase.removeChannel(channel);
       };
     }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
   }, [isAdmin, user?.id]);
 
   // Admin Dashboard
@@ -455,33 +599,36 @@ const Dashboard = () => {
 
       {/* Two Column Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Upcoming Events */}
+        {/* Achievements */}
         <Card className="border-none shadow-card">
           <CardHeader className="pb-4">
             <CardTitle className="flex items-center gap-2 text-lg">
-              <Calendar className="w-5 h-5 text-primary" />
-              Upcoming Events
+              <Award className="w-5 h-5 text-primary" />
+              Achievements
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {upcomingEvents.map((event, index) => (
+            {achievements.length > 0 ? achievements.map((achievement) => (
               <div
-                key={index}
+                key={achievement.id}
                 className="flex items-center gap-4 p-4 rounded-xl bg-muted/50 hover:bg-muted transition-colors"
               >
                 <div className="w-12 h-12 rounded-xl gradient-primary flex items-center justify-center flex-shrink-0">
-                  <Calendar className="w-5 h-5 text-primary-foreground" />
+                  <Award className="w-5 h-5 text-primary-foreground" />
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="font-semibold text-foreground truncate">
-                    {event.title}
-                  </p>
-                  <p className="text-sm text-muted-foreground">
-                    {event.date} at {event.time}
+                    {achievement.achievement_type === 'Participated' || achievement.achievement_type === 'Participant'
+                      ? `Participated in ${achievement.event_name}`
+                      : `${achievement.achievement_type} in ${achievement.event_name}`}
                   </p>
                 </div>
               </div>
-            ))}
+            )) : (
+              <p className="text-sm text-muted-foreground p-4 text-center bg-muted/50 rounded-xl">
+                No recent achievements
+              </p>
+            )}
           </CardContent>
         </Card>
 
@@ -494,7 +641,7 @@ const Dashboard = () => {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {recentGrades.map((item, index) => (
+            {recentGrades.length > 0 ? recentGrades.map((item, index) => (
               <div
                 key={index}
                 className="flex items-center gap-4 p-4 rounded-xl bg-muted/50"
@@ -519,7 +666,11 @@ const Dashboard = () => {
                   </div>
                 </div>
               </div>
-            ))}
+            )) : (
+              <p className="text-sm text-muted-foreground p-4 text-center bg-muted/50 rounded-xl">
+                No recent grades available
+              </p>
+            )}
           </CardContent>
         </Card>
       </div>
