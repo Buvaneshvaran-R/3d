@@ -1,0 +1,24 @@
+{
+  "name": "threejs-buildings-project",
+  "version": "1.0.0",
+  "description": "A Three.js project that procedurally generates buildings with specified designs and materials.",
+  "main": "src/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "serve": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.136.0"
+  },
+  "devDependencies": {
+    "vite": "^4.0.0"
+  },
+  "keywords": [
+    "three.js",
+    "buildings",
+    "procedural generation"
+  ],
+  "author": "Buvaneshvaran-R",
+  "license": "MIT"
+}

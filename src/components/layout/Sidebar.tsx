@@ -25,6 +25,7 @@ import { useState } from "react";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
+  { icon: Award, label: "Achievements", path: "/achievements" },
   { icon: User, label: "Personal Information", path: "/personal-info" },
   { icon: Calendar, label: "My Time Table", path: "/timetable" },
   { icon: BookOpen, label: "My Subject Registration", path: "/subject-registration" },

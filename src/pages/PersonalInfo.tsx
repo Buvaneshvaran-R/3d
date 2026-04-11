@@ -12,6 +12,7 @@ import { supabase } from "@/lib/supabase";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import { StudentFinder } from "@/components/admin/StudentFinder";
 
 // Blood group options
 const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
@@ -133,8 +134,8 @@ const InfoRow = memo(({
 
 InfoRow.displayName = 'InfoRow';
 
-const PersonalInfo = () => {
-  const { isAdmin, selectedStudent, user } = useAuth();
+  const PersonalInfo = () => {
+  const { isAdmin, selectedStudent, selectStudent, user } = useAuth();
   const { toast } = useToast();
   const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -480,10 +481,15 @@ const PersonalInfo = () => {
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <div className="flex items-center justify-between">
+      {isAdmin() && (
+        <div className="mb-6">
+          <StudentFinder onStudentSelect={selectStudent} />
+        </div>
+      )}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
         <h1 className="page-header mb-0">Personal Information</h1>
         {isAdmin() && selectedStudent && (
-          <div className="flex gap-2">
+          <div className="flex gap-2 w-full sm:w-auto justify-end">
             {isEditing ? (
               <>
                 <Button onClick={handleSave} disabled={saving} className="gap-2">

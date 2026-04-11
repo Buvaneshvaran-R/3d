@@ -1,3 +1,4 @@
+import { StudentFinderWrapper } from "@/components/admin/StudentFinderWrapper";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { MessageSquare, Star, CheckCircle2, Clock, AlertCircle } from "lucide-react";
@@ -25,6 +26,7 @@ const Feedbacks = () => {
 
   return (
     <div className="space-y-6 animate-fade-in">
+      <StudentFinderWrapper />
       <h1 className="page-header">Feedbacks</h1>
 
       {/* Progress Card */}

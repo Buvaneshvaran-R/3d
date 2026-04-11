@@ -143,11 +143,11 @@ export const CampusVisualizer: React.FC<CampusVisualizerProps> = ({
     sun.position.set(80, 110, 60);
     sun.castShadow = true;
     sun.shadow.mapSize.set(4096, 4096);
-    sun.shadow.camera.left   = -200;
-    sun.shadow.camera.right  =  200;
-    sun.shadow.camera.top    =  130;
-    sun.shadow.camera.bottom = -130;
-    sun.shadow.camera.far    =  500;
+    sun.shadow.camera.left   = -400;
+    sun.shadow.camera.right  =  400;
+    sun.shadow.camera.top    =  400;
+    sun.shadow.camera.bottom = -400;
+    sun.shadow.camera.far    =  1200;
     sun.shadow.bias = -0.0003;
     scene.add(sun);
 
@@ -159,7 +159,7 @@ export const CampusVisualizer: React.FC<CampusVisualizerProps> = ({
 
     /* Ground — grass */
     const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(380, 300),
+      new THREE.PlaneGeometry(1200, 1200),
       new THREE.MeshStandardMaterial({ color: 0x4a7c30, roughness: 0.95, metalness: 0 })
     );
     ground.rotation.x = -Math.PI / 2;
@@ -167,7 +167,33 @@ export const CampusVisualizer: React.FC<CampusVisualizerProps> = ({
     ground.receiveShadow = true;
     scene.add(ground);
 
-    /* Pathways */
+    
+    /* Parking lots */
+    const asphaltMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.95 });
+    const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    
+    [[-120, -70, 40, 60], [120, 70, 40, 60], [0, 120, 90, 35]].forEach(([px, pz, pw, pl]) => {
+      const pLot = new THREE.Mesh(new THREE.PlaneGeometry(pw, pl), asphaltMat);
+      pLot.rotation.x = -Math.PI / 2;
+      pLot.position.set(px, 0.05, pz);
+      pLot.receiveShadow = true;
+      scene.add(pLot);
+      
+      const numLines = Math.floor(pw/3.5);
+      for(let i=0; i<numLines; i++) {
+        const line1 = new THREE.Mesh(new THREE.PlaneGeometry(0.2, pl * 0.35), lineMat);
+        line1.rotation.x = -Math.PI / 2;
+        line1.position.set(px - pw/2 + 2 + i*3.5, 0.06, pz - pl * 0.25);
+        scene.add(line1);
+        
+        const line2 = new THREE.Mesh(new THREE.PlaneGeometry(0.2, pl * 0.35), lineMat);
+        line2.rotation.x = -Math.PI / 2;
+        line2.position.set(px - pw/2 + 2 + i*3.5, 0.06, pz + pl * 0.25);
+        scene.add(line2);
+      }
+    });
+
+/* Pathways */
     const pathMat = new THREE.MeshStandardMaterial({ color: 0xbcb4a4, roughness: 0.85 });
     campusData.pathways.forEach(pw => {
       const dx = pw.end.x - pw.start.x, dz = pw.end.z - pw.start.z;
@@ -183,6 +209,12 @@ export const CampusVisualizer: React.FC<CampusVisualizerProps> = ({
     /* Trees — data trees + extra border rows */
     campusData.trees.forEach(t => addTree(scene, t.position.x, t.position.z, t.scale));
     const borderTrees: [number, number][] = [
+      // Extended landscape trees
+      [-150, -150], [-100, -150], [-50, -150], [0, -150], [50, -150], [100, -150], [150, -150],
+      [-150, 150], [-100, 150], [-50, 150], [0, 150], [50, 150], [100, 150], [150, 150],
+      [-150, -100], [150, -100], [-150, 0], [150, 0], [-150, 100], [150, 100],
+      [-120, -80], [120, -80], [-120, 80], [120, 80],
+
       [-72, -58], [-55, -58], [-38, -58], [-18, -58], [0, -58], [18, -58], [38, -58], [58, -58], [75, -58],
       [-75, 30],  [-55, 32],  [60, 28],   [78, 32],
       [-78, -8],  [82, -8],
@@ -467,140 +499,577 @@ export const CampusVisualizer: React.FC<CampusVisualizerProps> = ({
 /* ═══════════════════════════════════════════════════════
    Building construction helper
 ══════════════════════════════════════════════════════════ */
+
+// ── REPLACEMENT BUILDING GENERATORS ──
+
+// Building A: RIT Block (Blue glass, alternating stripes, red borders)
+
+function addRoofDetails(group: THREE.Group, width: number, depth: number, yPos: number) {
+  const acMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.8, metalness: 0.2 });
+  const fanMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.9 });
+  
+  for(let i=0; i<4; i++) {
+    const w = 1.2 + Math.random() * 1.5;
+    const h = 0.8 + Math.random() * 0.8;
+    const d = 1.2 + Math.random() * 1.5;
+    const ac = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), acMat);
+    const px = (Math.random() - 0.5) * (width * 0.6);
+    const pz = (Math.random() - 0.5) * (depth * 0.6);
+    ac.position.set(px, yPos + h/2, pz);
+    ac.castShadow = true;
+    group.add(ac);
+    
+    const fan = new THREE.Mesh(new THREE.CylinderGeometry(w*0.35, w*0.35, 0.1, 8), fanMat);
+    fan.position.set(px, yPos + h + 0.05, pz);
+    group.add(fan);
+  }
+}
+
+function addEntranceSteps(group: THREE.Group, width: number, depth: number) {
+   const stepMat = new THREE.MeshStandardMaterial({ color: 0x999999, roughness: 0.9 });
+   for(let i=0; i<4; i++) {
+      const step = new THREE.Mesh(new THREE.BoxGeometry(12 + i*1.0, 0.2, 1.5), stepMat);
+      step.position.set(0, 0.1 + (3-i)*0.2, depth/2 + 1 + i*0.5);
+      step.castShadow = true; step.receiveShadow = true;
+      group.add(step);
+   }
+}
+
+function createSmartAcademicBlock(scene, bld, bodyMap) {
+  const group = new THREE.Group();
+  const width = 36;
+  const height = 24;
+  const depth = 16;
+  if(bld) group.position.set(bld.position.x, bld.position.y, bld.position.z);
+  else group.position.set(-80, 0, 0);
+
+  // Main back/base shell
+  const shellMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 });
+  const shell = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), shellMat);
+  shell.position.y = height / 2;
+  shell.castShadow = true; shell.receiveShadow = true;
+  if(bld) shell.userData = { building: bld };
+  group.add(shell);
+  if(bodyMap && bld) bodyMap.set(bld.id, shell);
+
+  const glassColor = 0x66aaff;
+  const redColor = 0xd32f2f;
+
+  // Central large glass section
+  const centerGlassMat = new THREE.MeshStandardMaterial({ color: glassColor, roughness: 0.1, metalness: 0.3 });
+  const centerGlass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.5, height * 0.7, depth + 0.2), centerGlassMat);
+  centerGlass.position.y = height / 2 + 1;
+  group.add(centerGlass);
+
+  // Side stripes (Blue and White)
+  const blueStripeMat = new THREE.MeshStandardMaterial({ color: glassColor, roughness: 0.2 });
+  const redMat = new THREE.MeshStandardMaterial({ color: redColor, roughness: 0.7 });
+  
+  for (let i = 1; i <= 4; i++) {
+    const h = i * (height / 5);
+    // Blue stripe
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(width + 0.1, 2, depth + 0.1), blueStripeMat);
+    stripe.position.y = h - 1;
+    group.add(stripe);
+    // Red thin separator
+    const redLedge = new THREE.Mesh(new THREE.BoxGeometry(width + 0.2, 0.4, depth + 0.2), redMat);
+    redLedge.position.y = h;
+    group.add(redLedge);
+    
+    // Zig-zag lines on left
+    const zigMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    const zig = new THREE.Mesh(new THREE.BoxGeometry(0.2, 3, 0.5), zigMat);
+    zig.position.set(-width / 2 + 2, h - 1.5, depth / 2 + 0.1);
+    zig.rotation.z = (i % 2 === 0) ? Math.PI / 4 : -Math.PI / 4;
+    group.add(zig);
+  }
+
+  // Top Red Roof Trim
+  const roofTrim = new THREE.Mesh(new THREE.BoxGeometry(width + 0.4, 1, depth + 0.4), redMat);
+  roofTrim.position.y = height + 0.5;
+  group.add(roofTrim);
+
+  // Bottom entrance
+  const entrance = new THREE.Mesh(new THREE.BoxGeometry(6, 4, depth + 0.4), blueStripeMat);
+  entrance.position.set(-width/4, 2, 0);
+  group.add(entrance);
+  const awning = new THREE.Mesh(new THREE.BoxGeometry(7, 0.5, 3), redMat);
+  awning.position.set(-width/4, 4.25, depth/2 + 1);
+  group.add(awning);
+
+  scene.add(group);
+  return group;
+}
+
+// Building B: White classic structure with multiple pillars
+function createSmartMainBlock(scene, bld, bodyMap) {
+  const group = new THREE.Group();
+  const width = 45;
+  const height = 30;
+  const depth = 20;
+
+  if(bld) group.position.set(bld.position.x, bld.position.y, bld.position.z);
+  else group.position.set(0, 0, 0);
+
+  const shellMat = new THREE.MeshStandardMaterial({ color: 0xf5f5f5, roughness: 0.9 });
+  const shell = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), shellMat);
+  shell.position.y = height / 2;
+  shell.castShadow = true; shell.receiveShadow = true;
+  if(bld) shell.userData = { building: bld };
+  group.add(shell);
+  if(bodyMap && bld) bodyMap.set(bld.id, shell);
+
+  // Roof blocks
+  for(let x of [-15, 0, 15]) {
+    const rBlock = new THREE.Mesh(new THREE.BoxGeometry(8, 4, depth-2), shellMat);
+    rBlock.position.set(x, height + 2, 0);
+    group.add(rBlock);
+  }
+
+  // Windows grid
+  const winMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.2 });
+  for(let r = 1; r <= 6; r++) {
+      for(let c = -10; c <= 10; c++) {
+          if (c % 5 === 0) continue; // Leave gaps
+          const win = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.8), winMat);
+          win.position.set(c * 2, r * 4 + 1, depth/2 + 0.05);
+          group.add(win);
+      }
+  }
+
+  // Central Entrance
+  const entMat = new THREE.MeshStandardMaterial({ color: 0xe0e0e0 });
+  const entrance = new THREE.Group();
+  entrance.position.set(0, 0, depth/2);
+  
+  const canopy = new THREE.Mesh(new THREE.BoxGeometry(10, 1, 6), shellMat);
+  canopy.position.set(0, 8, 3);
+  entrance.add(canopy);
+
+  // Cross arches
+  const arch1 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 9, 0.5), entMat);
+  arch1.position.set(-4, 4, 5); arch1.rotation.z = Math.PI / 8;
+  entrance.add(arch1);
+  const arch1b = new THREE.Mesh(new THREE.BoxGeometry(0.5, 9, 0.5), entMat);
+  arch1b.position.set(-4, 4, 5); arch1b.rotation.z = -Math.PI / 8;
+  entrance.add(arch1b);
+
+  const arch2 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 9, 0.5), entMat);
+  arch2.position.set(4, 4, 5); arch2.rotation.z = Math.PI / 8;
+  entrance.add(arch2);
+  const arch2b = new THREE.Mesh(new THREE.BoxGeometry(0.5, 9, 0.5), entMat);
+  arch2b.position.set(4, 4, 5); arch2b.rotation.z = -Math.PI / 8;
+  entrance.add(arch2b);
+
+  group.add(entrance);
+
+  // Side Entrances
+  for (let sx of [-16, 16]) {
+    const sideEnt = new THREE.Group();
+    sideEnt.position.set(sx, 0, depth/2);
+    const sCanopy = new THREE.Mesh(new THREE.BoxGeometry(6, 0.8, 4), shellMat);
+    sCanopy.position.set(0, 5, 2);
+    sideEnt.add(sCanopy);
+    const p1 = new THREE.Mesh(new THREE.BoxGeometry(0.6, 5, 0.6), entMat);
+    p1.position.set(-2.5, 2.5, 3.5);
+    sideEnt.add(p1);
+    const p2 = new THREE.Mesh(new THREE.BoxGeometry(0.6, 5, 0.6), entMat);
+    p2.position.set(2.5, 2.5, 3.5);
+    sideEnt.add(p2);
+    group.add(sideEnt);
+  }
+
+  scene.add(group);
+  return group;
+}
+
+// Building C: Brown and White with stairs/ramp
+function createSmartAuditorium(scene, bld, bodyMap) {
+  const group = new THREE.Group();
+  const width = 36;
+  const height = 22;
+  const depth = 18;
+  if(bld) group.position.set(bld.position.x, bld.position.y, bld.position.z);
+  else group.position.set(80, 0, 0);
+
+  const shellMat = new THREE.MeshBasicMaterial({ visible: false });
+  const shell = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), shellMat);
+  shell.position.y = height/2;
+  if(bld) shell.userData = { building: bld };
+  group.add(shell);
+  if(bodyMap && bld) bodyMap.set(bld.id, shell);
+
+  const whiteMat = new THREE.MeshStandardMaterial({ color: 0xf0f0f0, roughness: 0.9 });
+  const brownMat = new THREE.MeshStandardMaterial({ color: 0x9b6b4b, roughness: 0.8 });
+  const beigeMat = new THREE.MeshStandardMaterial({ color: 0xd2b48c, roughness: 0.9 });
+
+  // Main White Block (Right)
+  const mainWhite = new THREE.Mesh(new THREE.BoxGeometry(width * 0.6, height, depth), whiteMat);
+  mainWhite.position.set(width * 0.2, height/2, 0);
+  mainWhite.castShadow = true;
+  group.add(mainWhite);
+
+  // Tower Block (Top Left)
+  const tower = new THREE.Mesh(new THREE.BoxGeometry(width * 0.25, height + 4, depth), whiteMat);
+  tower.position.set(-width * 0.225, (height+4)/2, 0);
+  tower.castShadow = true;
+  group.add(tower);
+
+  // Front Brown Framing
+  const brownFrame1 = new THREE.Mesh(new THREE.BoxGeometry(1, height-2, depth+0.2), brownMat);
+  brownFrame1.position.set(-width*0.05, height/2 - 1, 0);
+  group.add(brownFrame1);
+  const brownFrame2 = new THREE.Mesh(new THREE.BoxGeometry(1, height-2, depth+0.2), brownMat);
+  brownFrame2.position.set(-width*0.35, height/2 - 1, 0);
+  group.add(brownFrame2);
+  const brownTop = new THREE.Mesh(new THREE.BoxGeometry(width*0.3+0.2, 3, depth+0.4), brownMat);
+  brownTop.position.set(-width*0.2, height-1.5, 0);
+  group.add(brownTop);
+
+  // Blue glass inside brown frame
+  const glassMat = new THREE.MeshStandardMaterial({ color: 0x88ccee, transparent: true, opacity: 0.7 });
+  const bigGlass = new THREE.Mesh(new THREE.BoxGeometry(width*0.3 - 2, height-5, depth+0.3), glassMat);
+  bigGlass.position.set(-width*0.2, (height-5)/2, 0);
+  group.add(bigGlass);
+
+  // Far Left Beige extensions
+  for(let i=0; i<3; i++) {
+    const ext = new THREE.Mesh(new THREE.BoxGeometry(2, height - 6 - i*2, depth - 4), i%2===0 ? beigeMat : brownMat);
+    ext.position.set(-width*0.35 - 2 - i*2, (height - 6 - i*2)/2, 0);
+    group.add(ext);
+  }
+
+  // Windows on White part
+  const winMat = new THREE.MeshStandardMaterial({ color: 0x88ccee, transparent: true, opacity: 0.8 });
+  for(let r=1; r<=3; r++) {
+    for(let c=0; c<2; c++) {
+      const winGroup = new THREE.Group();
+      winGroup.position.set(width * 0.15 + c*7, r*6, depth/2 + 0.05);
+      const w1 = new THREE.Mesh(new THREE.PlaneGeometry(2, 2.5), winMat);
+      w1.position.x = -1.2;
+      winGroup.add(w1);
+      const w2 = new THREE.Mesh(new THREE.PlaneGeometry(2, 2.5), winMat);
+      w2.position.x = 1.2;
+      winGroup.add(w2);
+      group.add(winGroup);
+    }
+  }
+
+  // Front Stairs and Ramp
+  const stairMat = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+  const stairGroup = new THREE.Group();
+  stairGroup.position.set(-width*0.2, 0, depth/2 + 2);
+  for(let i=0; i<5; i++) {
+    const step = new THREE.Mesh(new THREE.BoxGeometry(10, 0.2, 4 - i*0.8), stairMat);
+    step.position.set(0, i*0.2 + 0.1, (4 - i*0.8)/2);
+    stairGroup.add(step);
+  }
+  group.add(stairGroup);
+
+  const ramp = new THREE.Mesh(new THREE.BoxGeometry(4, 1.2, 6), stairMat);
+  ramp.position.set(width*0.1, 0.6, depth/2 + 3);
+  ramp.rotation.x = -Math.PI / 16;
+  group.add(ramp);
+
+  scene.add(group);
+  return group;
+}
+
+
+
+// ── REPLACEMENT BUILDING GENERATORS ──
+
+// Building A: RIT Block (Blue glass, alternating stripes, red borders)
+
+function addRoofDetails(group: THREE.Group, width: number, depth: number, yPos: number) {
+  const acMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.8, metalness: 0.2 });
+  const fanMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.9 });
+  
+  for(let i=0; i<4; i++) {
+    const w = 1.2 + Math.random() * 1.5;
+    const h = 0.8 + Math.random() * 0.8;
+    const d = 1.2 + Math.random() * 1.5;
+    const ac = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), acMat);
+    const px = (Math.random() - 0.5) * (width * 0.6);
+    const pz = (Math.random() - 0.5) * (depth * 0.6);
+    ac.position.set(px, yPos + h/2, pz);
+    ac.castShadow = true;
+    group.add(ac);
+    
+    const fan = new THREE.Mesh(new THREE.CylinderGeometry(w*0.35, w*0.35, 0.1, 8), fanMat);
+    fan.position.set(px, yPos + h + 0.05, pz);
+    group.add(fan);
+  }
+}
+
+function addEntranceSteps(group: THREE.Group, width: number, depth: number) {
+   const stepMat = new THREE.MeshStandardMaterial({ color: 0x999999, roughness: 0.9 });
+   for(let i=0; i<4; i++) {
+      const step = new THREE.Mesh(new THREE.BoxGeometry(12 + i*1.0, 0.2, 1.5), stepMat);
+      step.position.set(0, 0.1 + (3-i)*0.2, depth/2 + 1 + i*0.5);
+      step.castShadow = true; step.receiveShadow = true;
+      group.add(step);
+   }
+}
+
+function createSmartAcademicBlock(scene, bld, bodyMap) {
+  const group = new THREE.Group();
+  const width = 36;
+  const height = 24;
+  const depth = 16;
+  if(bld) group.position.set(bld.position.x, bld.position.y, bld.position.z);
+  else group.position.set(-80, 0, 0);
+
+  // Main back/base shell
+  const shellMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 });
+  const shell = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), shellMat);
+  shell.position.y = height / 2;
+  shell.castShadow = true; shell.receiveShadow = true;
+  if(bld) shell.userData = { building: bld };
+  group.add(shell);
+  if(bodyMap && bld) bodyMap.set(bld.id, shell);
+
+  const glassColor = 0x66aaff;
+  const redColor = 0xd32f2f;
+
+  // Central large glass section
+  const centerGlassMat = new THREE.MeshStandardMaterial({ color: glassColor, roughness: 0.1, metalness: 0.3 });
+  const centerGlass = new THREE.Mesh(new THREE.BoxGeometry(width * 0.5, height * 0.7, depth + 0.2), centerGlassMat);
+  centerGlass.position.y = height / 2 + 1;
+  group.add(centerGlass);
+
+  // Side stripes (Blue and White)
+  const blueStripeMat = new THREE.MeshStandardMaterial({ color: glassColor, roughness: 0.2 });
+  const redMat = new THREE.MeshStandardMaterial({ color: redColor, roughness: 0.7 });
+  
+  for (let i = 1; i <= 4; i++) {
+    const h = i * (height / 5);
+    // Blue stripe
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(width + 0.1, 2, depth + 0.1), blueStripeMat);
+    stripe.position.y = h - 1;
+    group.add(stripe);
+    // Red thin separator
+    const redLedge = new THREE.Mesh(new THREE.BoxGeometry(width + 0.2, 0.4, depth + 0.2), redMat);
+    redLedge.position.y = h;
+    group.add(redLedge);
+    
+    // Zig-zag lines on left
+    const zigMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    const zig = new THREE.Mesh(new THREE.BoxGeometry(0.2, 3, 0.5), zigMat);
+    zig.position.set(-width / 2 + 2, h - 1.5, depth / 2 + 0.1);
+    zig.rotation.z = (i % 2 === 0) ? Math.PI / 4 : -Math.PI / 4;
+    group.add(zig);
+  }
+
+  // Top Red Roof Trim
+  const roofTrim = new THREE.Mesh(new THREE.BoxGeometry(width + 0.4, 1, depth + 0.4), redMat);
+  roofTrim.position.y = height + 0.5;
+  group.add(roofTrim);
+
+  // Bottom entrance
+  const entrance = new THREE.Mesh(new THREE.BoxGeometry(6, 4, depth + 0.4), blueStripeMat);
+  entrance.position.set(-width/4, 2, 0);
+  group.add(entrance);
+  const awning = new THREE.Mesh(new THREE.BoxGeometry(7, 0.5, 3), redMat);
+  awning.position.set(-width/4, 4.25, depth/2 + 1);
+  group.add(awning);
+
+  scene.add(group);
+  return group;
+}
+
+// Building B: White classic structure with multiple pillars
+function createSmartMainBlock(scene, bld, bodyMap) {
+  const group = new THREE.Group();
+  const width = 45;
+  const height = 30;
+  const depth = 20;
+
+  if(bld) group.position.set(bld.position.x, bld.position.y, bld.position.z);
+  else group.position.set(0, 0, 0);
+
+  const shellMat = new THREE.MeshStandardMaterial({ color: 0xf5f5f5, roughness: 0.9 });
+  const shell = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), shellMat);
+  shell.position.y = height / 2;
+  shell.castShadow = true; shell.receiveShadow = true;
+  if(bld) shell.userData = { building: bld };
+  group.add(shell);
+  if(bodyMap && bld) bodyMap.set(bld.id, shell);
+
+  // Roof blocks
+  for(let x of [-15, 0, 15]) {
+    const rBlock = new THREE.Mesh(new THREE.BoxGeometry(8, 4, depth-2), shellMat);
+    rBlock.position.set(x, height + 2, 0);
+    group.add(rBlock);
+  }
+
+  // Windows grid
+  const winMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.2 });
+  for(let r = 1; r <= 6; r++) {
+      for(let c = -10; c <= 10; c++) {
+          if (c % 5 === 0) continue; // Leave gaps
+          const win = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.8), winMat);
+          win.position.set(c * 2, r * 4 + 1, depth/2 + 0.05);
+          group.add(win);
+      }
+  }
+
+  // Central Entrance
+  const entMat = new THREE.MeshStandardMaterial({ color: 0xe0e0e0 });
+  const entrance = new THREE.Group();
+  entrance.position.set(0, 0, depth/2);
+  
+  const canopy = new THREE.Mesh(new THREE.BoxGeometry(10, 1, 6), shellMat);
+  canopy.position.set(0, 8, 3);
+  entrance.add(canopy);
+
+  // Cross arches
+  const arch1 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 9, 0.5), entMat);
+  arch1.position.set(-4, 4, 5); arch1.rotation.z = Math.PI / 8;
+  entrance.add(arch1);
+  const arch1b = new THREE.Mesh(new THREE.BoxGeometry(0.5, 9, 0.5), entMat);
+  arch1b.position.set(-4, 4, 5); arch1b.rotation.z = -Math.PI / 8;
+  entrance.add(arch1b);
+
+  const arch2 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 9, 0.5), entMat);
+  arch2.position.set(4, 4, 5); arch2.rotation.z = Math.PI / 8;
+  entrance.add(arch2);
+  const arch2b = new THREE.Mesh(new THREE.BoxGeometry(0.5, 9, 0.5), entMat);
+  arch2b.position.set(4, 4, 5); arch2b.rotation.z = -Math.PI / 8;
+  entrance.add(arch2b);
+
+  group.add(entrance);
+
+  // Side Entrances
+  for (let sx of [-16, 16]) {
+    const sideEnt = new THREE.Group();
+    sideEnt.position.set(sx, 0, depth/2);
+    const sCanopy = new THREE.Mesh(new THREE.BoxGeometry(6, 0.8, 4), shellMat);
+    sCanopy.position.set(0, 5, 2);
+    sideEnt.add(sCanopy);
+    const p1 = new THREE.Mesh(new THREE.BoxGeometry(0.6, 5, 0.6), entMat);
+    p1.position.set(-2.5, 2.5, 3.5);
+    sideEnt.add(p1);
+    const p2 = new THREE.Mesh(new THREE.BoxGeometry(0.6, 5, 0.6), entMat);
+    p2.position.set(2.5, 2.5, 3.5);
+    sideEnt.add(p2);
+    group.add(sideEnt);
+  }
+
+  scene.add(group);
+  return group;
+}
+
+// Building C: Brown and White with stairs/ramp
+function createSmartAuditorium(scene, bld, bodyMap) {
+  const group = new THREE.Group();
+  const width = 36;
+  const height = 22;
+  const depth = 18;
+  if(bld) group.position.set(bld.position.x, bld.position.y, bld.position.z);
+  else group.position.set(80, 0, 0);
+
+  const shellMat = new THREE.MeshBasicMaterial({ visible: false });
+  const shell = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), shellMat);
+  shell.position.y = height/2;
+  if(bld) shell.userData = { building: bld };
+  group.add(shell);
+  if(bodyMap && bld) bodyMap.set(bld.id, shell);
+
+  const whiteMat = new THREE.MeshStandardMaterial({ color: 0xf0f0f0, roughness: 0.9 });
+  const brownMat = new THREE.MeshStandardMaterial({ color: 0x9b6b4b, roughness: 0.8 });
+  const beigeMat = new THREE.MeshStandardMaterial({ color: 0xd2b48c, roughness: 0.9 });
+
+  // Main White Block (Right)
+  const mainWhite = new THREE.Mesh(new THREE.BoxGeometry(width * 0.6, height, depth), whiteMat);
+  mainWhite.position.set(width * 0.2, height/2, 0);
+  mainWhite.castShadow = true;
+  group.add(mainWhite);
+
+  // Tower Block (Top Left)
+  const tower = new THREE.Mesh(new THREE.BoxGeometry(width * 0.25, height + 4, depth), whiteMat);
+  tower.position.set(-width * 0.225, (height+4)/2, 0);
+  tower.castShadow = true;
+  group.add(tower);
+
+  // Front Brown Framing
+  const brownFrame1 = new THREE.Mesh(new THREE.BoxGeometry(1, height-2, depth+0.2), brownMat);
+  brownFrame1.position.set(-width*0.05, height/2 - 1, 0);
+  group.add(brownFrame1);
+  const brownFrame2 = new THREE.Mesh(new THREE.BoxGeometry(1, height-2, depth+0.2), brownMat);
+  brownFrame2.position.set(-width*0.35, height/2 - 1, 0);
+  group.add(brownFrame2);
+  const brownTop = new THREE.Mesh(new THREE.BoxGeometry(width*0.3+0.2, 3, depth+0.4), brownMat);
+  brownTop.position.set(-width*0.2, height-1.5, 0);
+  group.add(brownTop);
+
+  // Blue glass inside brown frame
+  const glassMat = new THREE.MeshStandardMaterial({ color: 0x88ccee, transparent: true, opacity: 0.7 });
+  const bigGlass = new THREE.Mesh(new THREE.BoxGeometry(width*0.3 - 2, height-5, depth+0.3), glassMat);
+  bigGlass.position.set(-width*0.2, (height-5)/2, 0);
+  group.add(bigGlass);
+
+  // Far Left Beige extensions
+  for(let i=0; i<3; i++) {
+    const ext = new THREE.Mesh(new THREE.BoxGeometry(2, height - 6 - i*2, depth - 4), i%2===0 ? beigeMat : brownMat);
+    ext.position.set(-width*0.35 - 2 - i*2, (height - 6 - i*2)/2, 0);
+    group.add(ext);
+  }
+
+  // Windows on White part
+  const winMat = new THREE.MeshStandardMaterial({ color: 0x88ccee, transparent: true, opacity: 0.8 });
+  for(let r=1; r<=3; r++) {
+    for(let c=0; c<2; c++) {
+      const winGroup = new THREE.Group();
+      winGroup.position.set(width * 0.15 + c*7, r*6, depth/2 + 0.05);
+      const w1 = new THREE.Mesh(new THREE.PlaneGeometry(2, 2.5), winMat);
+      w1.position.x = -1.2;
+      winGroup.add(w1);
+      const w2 = new THREE.Mesh(new THREE.PlaneGeometry(2, 2.5), winMat);
+      w2.position.x = 1.2;
+      winGroup.add(w2);
+      group.add(winGroup);
+    }
+  }
+
+  // Front Stairs and Ramp
+  const stairMat = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+  const stairGroup = new THREE.Group();
+  stairGroup.position.set(-width*0.2, 0, depth/2 + 2);
+  for(let i=0; i<5; i++) {
+    const step = new THREE.Mesh(new THREE.BoxGeometry(10, 0.2, 4 - i*0.8), stairMat);
+    step.position.set(0, i*0.2 + 0.1, (4 - i*0.8)/2);
+    stairGroup.add(step);
+  }
+  group.add(stairGroup);
+
+  const ramp = new THREE.Mesh(new THREE.BoxGeometry(4, 1.2, 6), stairMat);
+  ramp.position.set(width*0.1, 0.6, depth/2 + 3);
+  ramp.rotation.x = -Math.PI / 16;
+  group.add(ramp);
+
+  scene.add(group);
+  return group;
+}
+
+
 function buildBuilding(
   scene: THREE.Scene,
   bld: Building,
   roomMap: Map<string, RoomMesh>,
   bodyMap: Map<string, BuildingBodyMesh>
 ) {
-  const { x, y, z } = bld.position;
-  const { width, depth, height } = bld.dimensions;
+  if (bld.id.includes('A')) {
+      createSmartAcademicBlock(scene, bld, bodyMap);
+  } else if (bld.id.includes('B') || bld.id.includes('Main') || bld.id.includes('Admin')) {
+      createSmartMainBlock(scene, bld, bodyMap);
+  } else {
+      createSmartAuditorium(scene, bld, bodyMap);
+  }
+
+  // Generate clickable room meshes inside glass
   const group = new THREE.Group();
-  group.position.set(x, y, z);
-
-  const bColor = new THREE.Color(bld.color.r, bld.color.g, bld.color.b);
-
-  /* ── Main concrete body ── */
-  const bodyMat = new THREE.MeshStandardMaterial({ color: bColor, roughness: 0.72, metalness: 0.06 });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), bodyMat) as BuildingBodyMesh;
-  body.position.y = height / 2;
-  body.castShadow = true;
-  body.receiveShadow = true;
-  body.userData = { building: bld };
-  group.add(body);
-  bodyMap.set(bld.id, body);
-
-  /* ── Corner columns (structural look) ── */
-  const colColor = new THREE.Color(bld.color.r * 0.80, bld.color.g * 0.80, bld.color.b * 0.80);
-  const colMat = new THREE.MeshStandardMaterial({ color: colColor, roughness: 0.65 });
-  const colGeo = new THREE.BoxGeometry(1.5, height, 1.5);
-  [[-width / 2 + 0.7, -depth / 2 + 0.7], [width / 2 - 0.7, -depth / 2 + 0.7],
-   [-width / 2 + 0.7,  depth / 2 - 0.7], [width / 2 - 0.7,  depth / 2 - 0.7]
-  ].forEach(([cx, cz]) => {
-    const col = new THREE.Mesh(colGeo, colMat);
-    col.position.set(cx, height / 2, cz);
-    col.castShadow = true;
-    group.add(col);
-  });
-
-  /* ── Floor separator ledges ── */
-  const ledgeMat = new THREE.MeshStandardMaterial({ color: 0xf0ece6, roughness: 0.55, metalness: 0.08 });
-  bld.floors.forEach((floor, i) => {
-    if (i === 0) return;
-    const ledge = new THREE.Mesh(new THREE.BoxGeometry(width + 0.9, 0.55, depth + 0.9), ledgeMat);
-    ledge.position.y = floor.height;
-    group.add(ledge);
-  });
-
-  /* ── Balcony slabs (every intermediate floor) ── */
-  const balColor = new THREE.Color(bld.color.r * 0.88, bld.color.g * 0.88, bld.color.b * 0.88);
-  const balMat = new THREE.MeshStandardMaterial({ color: balColor, roughness: 0.68 });
-  bld.floors.forEach((floor, i) => {
-    if (i === 0 || i >= bld.floors.length - 1) return;
-    const slab = new THREE.Mesh(new THREE.BoxGeometry(width + 1.8, 0.28, depth + 1.8), balMat);
-    slab.position.y = floor.height + 0.28;
-    group.add(slab);
-  });
-
-  /* ── Glass windows per floor ── */
-  const winMat = new THREE.MeshStandardMaterial({
-    color: 0x9ecde8, roughness: 0.04, metalness: 0.55, transparent: true, opacity: 0.78,
-  });
-  const wW = 1.3, wH = 1.55, wSpX = 2.5, wSpZ = 2.5;
-  bld.floors.forEach(floor => {
-    const fy = floor.height + 2.3;
-    /* front + back */
-    const nX = Math.floor((width - 2.5) / wSpX);
-    for (let i = 0; i < nX; i++) {
-      const wx = -width / 2 + 1.5 + i * wSpX;
-      [depth / 2 + 0.07, -depth / 2 - 0.07].forEach(wz => {
-        const w = new THREE.Mesh(new THREE.BoxGeometry(wW, wH, 0.12), winMat);
-        w.position.set(wx, fy, wz);
-        group.add(w);
-      });
-    }
-    /* left + right sides */
-    const nZ = Math.floor((depth - 2.5) / wSpZ);
-    for (let j = 0; j < nZ; j++) {
-      const wz = -depth / 2 + 1.5 + j * wSpZ;
-      [-width / 2 - 0.07, width / 2 + 0.07].forEach(wx => {
-        const w = new THREE.Mesh(new THREE.BoxGeometry(0.12, wH, wW), winMat);
-        w.position.set(wx, fy, wz);
-        group.add(w);
-      });
-    }
-  });
-
-  /* ── Entrance canopy (ground-floor front) ── */
-  const canoMat = new THREE.MeshStandardMaterial({ color: 0x1e5fa8, roughness: 0.42, metalness: 0.38 });
-  const canopy = new THREE.Mesh(new THREE.BoxGeometry(width * 0.42, 0.45, 3.8), canoMat);
-  canopy.position.set(0, 4.0, depth / 2 + 1.8);
-  canopy.castShadow = true;
-  group.add(canopy);
-  /* canopy pillars */
-  [-width * 0.18, width * 0.18].forEach(px => {
-    const pillar = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.18, 0.22, 4.0, 8),
-      new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.5 })
-    );
-    pillar.position.set(px, 2.0, depth / 2 + 2.9);
-    pillar.castShadow = true;
-    group.add(pillar);
-  });
-
-  /* ── Roof parapet ── */
-  const roofPMat = new THREE.MeshStandardMaterial({ color: 0x3c3c3c, roughness: 0.82, metalness: 0.1 });
-  const roofSlab = new THREE.Mesh(new THREE.BoxGeometry(width + 0.6, 0.7, depth + 0.6), roofPMat);
-  roofSlab.position.y = height + 0.35;
-  group.add(roofSlab);
-
-  /* ── Roof accent bar (corporate look) ── */
-  const accentMat = new THREE.MeshStandardMaterial({ color: 0x1e5fa8, roughness: 0.38, metalness: 0.28 });
-  const accent = new THREE.Mesh(new THREE.BoxGeometry(width * 0.6, 1.4, 1.8), accentMat);
-  accent.position.set(0, height + 1.4, 0);
-  group.add(accent);
-
-  /* ── 3D Building label facing camera ── */
-  const labelCanvas = document.createElement('canvas');
-  labelCanvas.width = 512; labelCanvas.height = 144;
-  const ctx = labelCanvas.getContext('2d')!;
-  ctx.clearRect(0, 0, 512, 144);
-  ctx.shadowColor = 'rgba(0,0,0,0.8)';
-  ctx.shadowBlur  = 12;
-  ctx.fillStyle   = '#ffffff';
-  ctx.font        = 'bold 68px Arial';
-  ctx.textAlign   = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(`Block ${bld.id}`, 256, 72);
-  const labelTex = new THREE.CanvasTexture(labelCanvas);
-  const labelMesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(12, 3.2),
-    new THREE.MeshBasicMaterial({ map: labelTex, transparent: true, depthTest: false, side: THREE.DoubleSide })
-  );
-  labelMesh.position.set(0, height + 4.8, depth / 2 + 1.2);
-  group.add(labelMesh);
-
-  /* ── Room meshes (colour-coded by type & occupancy) ── */
+  group.position.set(bld.position.x, bld.position.y, bld.position.z);
   bld.floors.forEach(floor => {
     floor.rooms.forEach(room => {
       const isSeminar = room.type === 'seminar_hall';
@@ -611,6 +1080,7 @@ function buildBuilding(
       const rMat = new THREE.MeshStandardMaterial({
         color: getRoomColor(room),
         roughness: 0.58, metalness: 0.1,
+        transparent: true, opacity: 0.55,
         emissive: (room.occupancyStatus ?? 'empty') === 'occupied'
           ? new THREE.Color(0.12, 0, 0) : new THREE.Color(0, 0, 0),
         emissiveIntensity: (room.occupancyStatus ?? 'empty') === 'occupied' ? 1 : 0,
@@ -619,15 +1089,14 @@ function buildBuilding(
       const rMesh = new THREE.Mesh(new THREE.BoxGeometry(rW, rH, rD), rMat) as RoomMesh;
       rMesh.userData = { room };
       rMesh.position.set(room.position.x, room.position.y + 1.0, room.position.z);
-      rMesh.castShadow = true;
-      rMesh.receiveShadow = true;
+      rMesh.castShadow = true; rMesh.receiveShadow = true;
       group.add(rMesh);
       roomMap.set(room.id, rMesh);
     });
   });
-
   scene.add(group);
 }
+
 
 /* ═══════════════════════════════════════════════════════
    Environment helpers

@@ -9,6 +9,7 @@ import { AuthProvider } from "./contexts/AuthContext";
 import Login from "./pages/Login";
 import SignUp from "./pages/SignUp";
 import Dashboard from "./pages/Dashboard";
+import Achievements from "./pages/Achievements";
 import PersonalInfo from "./pages/PersonalInfo";
 import Attendance from "./pages/Attendance";
 import FeeDetails from "./pages/FeeDetails";
@@ -60,6 +61,7 @@ const App = () => (
             {/* Protected Routes with Dashboard Layout */}
             <Route element={<DashboardLayout />}>
               <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/achievements" element={<Achievements />} />
               <Route path="/personal-info" element={<PersonalInfo />} />
               <Route path="/timetable" element={<TimeTable />} />
               <Route path="/subject-registration" element={<SubjectRegistration />} />

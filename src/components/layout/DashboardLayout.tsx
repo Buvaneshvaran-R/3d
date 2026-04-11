@@ -2,7 +2,6 @@ import { Outlet, useNavigate } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import { LogOut } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
-import { StudentSelector } from "@/components/admin/StudentSelector";
 import { NotificationIcon } from "@/components/NotificationIcon";
 import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
@@ -110,8 +109,6 @@ const DashboardLayout = () => {
 
         {/* Page Content */}
         <main className="p-4 lg:p-8">
-          {/* Admin Student Selector */}
-          {isAdmin() && <StudentSelector />}
           
           <Outlet />
         </main>
