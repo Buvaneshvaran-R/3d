@@ -12,6 +12,7 @@ interface FloorVisualizerProps {
   allocations?: Allocation[];
   externalTeacherQuery?: string;
   isAdmin?: boolean;
+  currentUserId?: string;
   onAdminRoomAction?: (payload: {
     action: 'book' | 'takeover' | 'unbook';
     buildingId: string;
@@ -311,6 +312,7 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
   allocations = [],
   externalTeacherQuery,
   isAdmin = false,
+  currentUserId,
   onAdminRoomAction,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1404,6 +1406,10 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
     : null;
 
   const selectedRoomStatus = selectedRoom ? getAllocationStatus(selectedRoom.allocation) : 'FREE';
+  const canUnbookSelectedRoom =
+    !!selectedRoom?.allocation &&
+    !!currentUserId &&
+    selectedRoom.allocation.teacher_user_id === currentUserId;
 
   return (
     <div
@@ -1559,7 +1565,7 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
                     </Button>
                   )}
 
-                  {selectedRoom.allocation && (
+                  {canUnbookSelectedRoom && (
                     <Button
                       size="sm"
                       variant="destructive"

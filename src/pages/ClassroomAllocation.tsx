@@ -21,16 +21,14 @@ interface AllocationTemplateRow {
   status?: string;
 }
 
-const ALLOCATION_OWNER_EMAIL = "chanuadmin@rit.edu";
-
 const ClassroomAllocation = () => {
-  const { user } = useAuth();
+  const { user, isAdmin } = useAuth();
   const { toast } = useToast();
   const [allocationUploadText, setAllocationUploadText] = useState("");
   const [isUploadingAllocations, setIsUploadingAllocations] = useState(false);
   const allocationFileRef = useRef<HTMLInputElement | null>(null);
 
-  const canAccessAllocationModule = user?.email?.toLowerCase() === ALLOCATION_OWNER_EMAIL;
+  const canAccessAllocationModule = isAdmin();
 
   if (!user) {
     return <Navigate to="/login" replace />;
@@ -42,7 +40,7 @@ const ClassroomAllocation = () => {
         <Card className="mx-auto max-w-2xl p-6">
           <h1 className="text-2xl font-bold">Classroom Allocation</h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            Access restricted. This module is only available to {ALLOCATION_OWNER_EMAIL}.
+            Access restricted. This module is only available to admin users.
           </p>
         </Card>
       </div>

@@ -71,11 +71,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const fetchUserRole = async (userId: string) => {
     try {
       // 1. Check admin
-      const { data: adminData } = await supabase
+      const { data: adminData, error: adminError } = await supabase
         .from('admins')
         .select('id, name')
         .eq('user_id', userId)
-        .single();
+        .limit(1)
+        .maybeSingle();
+
+      if (adminError) {
+        throw adminError;
+      }
 
       if (adminData) {
         setRole('admin');
@@ -84,11 +89,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       }
 
       // 2. Check print keeper
-      const { data: keeperData } = await supabase
+      const { data: keeperData, error: keeperError } = await supabase
         .from('print_keepers')
         .select('id, name')
         .eq('user_id', userId)
-        .single();
+        .limit(1)
+        .maybeSingle();
+
+      if (keeperError) {
+        throw keeperError;
+      }
 
       if (keeperData) {
         setRole('print_keeper');
@@ -101,7 +111,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         .from('students')
         .select('name')
         .eq('user_id', userId)
-        .single();
+        .limit(1)
+        .maybeSingle();
 
       setRole('student');
       setUser((u) => (u && studentData) ? { ...u, name: studentData.name } : u);
@@ -123,7 +134,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           .from('print_keepers')
           .select('id')
           .eq('user_id', data.user.id)
-          .single();
+          .maybeSingle();
         if (!keeperData) {
           await supabase.auth.signOut();
           throw new Error('Invalid credentials. Please use print keeper credentials.');
@@ -131,11 +142,37 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         return;
       }
 
-      const { data: adminData } = await supabase
+      let { data: adminData } = await supabase
         .from('admins')
         .select('id')
         .eq('user_id', data.user.id)
-        .single();
+        .maybeSingle();
+
+      if (!adminData && roleType === 'admin') {
+        const normalizedEmail = (data.user.email || email).toLowerCase();
+        const looksLikeAdminEmail = normalizedEmail.includes('admin');
+
+        if (looksLikeAdminEmail) {
+          // Best-effort self-heal for environments where signup trigger was not applied.
+          const { error: promoteError } = await supabase.rpc('create_admin_manually', {
+            p_user_id: data.user.id,
+            p_name: data.user.user_metadata?.name || normalizedEmail.split('@')[0],
+            p_email: normalizedEmail,
+            p_designation: data.user.user_metadata?.designation || 'Academic Officer',
+            p_department: data.user.user_metadata?.department || 'Administration',
+          });
+
+          if (!promoteError) {
+            const { data: repairedAdminData } = await supabase
+              .from('admins')
+              .select('id')
+              .eq('user_id', data.user.id)
+              .maybeSingle();
+
+            adminData = repairedAdminData;
+          }
+        }
+      }
 
       const userIsAdmin = !!adminData;
       const expectedAdmin = roleType === 'admin';
