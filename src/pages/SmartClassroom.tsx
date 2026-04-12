@@ -151,10 +151,37 @@ const CLASS_PERIODS = [
   { label: "14:15-15:00", startMinutes: 14 * 60 + 15, endMinutes: 15 * 60 },
 ];
 
+const BLOCKED_BOOKING_WINDOWS = [
+  { startMinutes: 9 * 60 + 40, endMinutes: 10 * 60 + 10 },
+  { startMinutes: 12 * 60 + 40, endMinutes: 13 * 60 + 30 },
+];
+
 const resolveBookingPeriod = (reference: Date) => {
   const nowMinutes = reference.getHours() * 60 + reference.getMinutes();
+
+  const isBlockedWindow = BLOCKED_BOOKING_WINDOWS.some(
+    (window) => nowMinutes >= window.startMinutes && nowMinutes < window.endMinutes
+  );
+  if (isBlockedWindow) return null;
+
   const period = CLASS_PERIODS.find((item) => nowMinutes >= item.startMinutes && nowMinutes < item.endMinutes);
-  if (!period) return null;
+  if (!period) {
+    if (nowMinutes >= 15 * 60) {
+      const slotStart = new Date(reference);
+      slotStart.setSeconds(0, 0);
+
+      const slotEnd = new Date(reference);
+      slotEnd.setHours(23, 59, 59, 999);
+
+      return {
+        label: "After 15:00",
+        slotStart,
+        slotEnd,
+      };
+    }
+
+    return null;
+  }
 
   const periodStart = new Date(reference);
   periodStart.setHours(Math.floor(period.startMinutes / 60), period.startMinutes % 60, 0, 0);
@@ -218,6 +245,24 @@ const isMissingScheduleTableError = (error: unknown) => {
 
   const normalized = text.toLowerCase();
   return normalized.includes("pgrst205") || normalized.includes("classroom_schedule_slots");
+};
+
+const normalizeSearchText = (value: string) => value.trim().toLowerCase().replace(/\s+/g, " ");
+
+const isTeacherNameMatch = (name: string, query: string) => {
+  const normalizedName = normalizeSearchText(name);
+  const normalizedQuery = normalizeSearchText(query);
+
+  if (!normalizedQuery) return true;
+  if (!normalizedName) return false;
+  if (normalizedName === normalizedQuery) return true;
+
+  const nameTokens = normalizedName.split(" ").filter(Boolean);
+  const queryTokens = normalizedQuery.split(" ").filter(Boolean);
+
+  return queryTokens.every((queryToken) =>
+    nameTokens.some((nameToken) => nameToken.startsWith(queryToken))
+  );
 };
 
 const SmartClassroom = () => {
@@ -361,6 +406,7 @@ const SmartClassroom = () => {
 
     schedules.forEach((schedule) => {
       const slot = normalizeSchedule(schedule);
+      if (slot.session_status === "SESSION_COMPLETED" || slot.session_status === "OFFSITE") return;
       const slotStart = new Date(slot.slot_start);
       const slotEnd = new Date(slot.slot_end);
 
@@ -818,12 +864,12 @@ const SmartClassroom = () => {
     : "FREE";
 
   const teacherSearchRows = useMemo(() => {
-    const query = searchTeacher.trim().toLowerCase();
+    const query = searchTeacher.trim();
     if (!query) return [];
 
     const now = Date.now();
     return teachers
-      .filter((teacher) => teacher.name.toLowerCase().includes(query))
+      .filter((teacher) => isTeacherNameMatch(teacher.name, query))
       .map((teacher) => {
         const teacherSlots = schedules
           .filter((slot) => slot.teacher_user_id === teacher.user_id)
@@ -856,21 +902,33 @@ const SmartClassroom = () => {
   }, [searchTeacher, teachers, schedules, classrooms, blocks]);
 
   const navigatorTeacherResults = useMemo(() => {
-    const query = navigatorTeacherQuery.trim().toLowerCase();
+    const query = navigatorTeacherQuery.trim();
     if (!query) return [];
 
-    return classroomAllocations
-      .filter((row) => row.allocated_staff.toLowerCase().includes(query))
-      .slice(0, 6);
+    const filtered = classroomAllocations.filter((row) =>
+      isTeacherNameMatch(row.allocated_staff, query)
+    );
+
+    const uniqueRows = filtered.filter((row, index, arr) => {
+      const dedupeKey = `${row.allocated_staff}-${row.classroom_id}-${row.time_start}-${row.time_end}`;
+      return (
+        arr.findIndex(
+          (item) =>
+            `${item.allocated_staff}-${item.classroom_id}-${item.time_start}-${item.time_end}` === dedupeKey
+        ) === index
+      );
+    });
+
+    return uniqueRows.slice(0, 6);
   }, [navigatorTeacherQuery, classroomAllocations]);
 
   const teacherNameSuggestions = useMemo(() => {
     const names = [...new Set(teachers.map((teacher) => teacher.name).filter(Boolean))].sort((a, b) =>
       a.localeCompare(b)
     );
-    const query = navigatorTeacherQuery.trim().toLowerCase();
+    const query = navigatorTeacherQuery.trim();
     if (!query) return [];
-    return names.filter((name) => name.toLowerCase().includes(query)).slice(0, 8);
+    return names.filter((name) => isTeacherNameMatch(name, query)).slice(0, 8);
   }, [teachers, navigatorTeacherQuery]);
 
   const focusTeacherInNavigator = (allocation: ClassroomAllocation) => {
@@ -1280,6 +1338,8 @@ const SmartClassroom = () => {
                 ...slot,
                 session_status: "SESSION_COMPLETED",
                 offsite_marked_at: nowIso,
+                confirmed_at: null,
+                confirmed_by: null,
               }
             : slot
         )
@@ -1309,6 +1369,8 @@ const SmartClassroom = () => {
         session_status: "SESSION_COMPLETED",
         offsite_marked_at: nowIso,
         offsite_reason: reason === "manual" ? "Unbooked by admin" : "Auto-release at period end",
+        confirmed_at: null,
+        confirmed_by: null,
       })
       .eq("id", targetSlot.id);
 
@@ -1456,6 +1518,15 @@ const SmartClassroom = () => {
     }
 
     if (payload.action === "unbook") {
+      if (targetSlot.teacher_user_id !== user.id) {
+        toast({
+          title: "Unbook not allowed",
+          description: "Only the admin who booked this classroom can unbook it.",
+          variant: "destructive",
+        });
+        return;
+      }
+
       setIsSavingScheduleAction(true);
       try {
         await releaseBookedSlot(targetClassroom, targetSlot, "manual");
@@ -2351,6 +2422,7 @@ const SmartClassroom = () => {
               allocations={classroomAllocations}
               externalTeacherQuery={navigatorTeacherQuery}
               isAdmin={isAdmin()}
+              currentUserId={user?.id}
               onAdminRoomAction={handleFloorVisualizerAdminAction}
             />
           </div>
@@ -2488,6 +2560,14 @@ const SmartClassroom = () => {
                 </div>
               </div>
             ))}
+
+            {classrooms.filter((classroom) =>
+              !classroomAllocations.some((a) => a.classroom_id === classroom.id)
+            ).length === 0 && (
+              <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                No classrooms are currently free for pickup booking in this slot.
+              </div>
+            )}
           </div>
         </Card>
       )}

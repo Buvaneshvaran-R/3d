@@ -76,9 +76,10 @@ const DashboardLayout = () => {
 
   const unreadCount = notifications.filter(n => n.unread).length;
 
-  const handleLogout = () => {
-    logout();
-    navigate("/login");
+  const handleLogout = async () => {
+    const wasAdmin = isAdmin();
+    await logout();
+    navigate(wasAdmin ? "/admin-login" : "/login");
   };
 
   return (

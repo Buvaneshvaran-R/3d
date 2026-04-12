@@ -24,7 +24,6 @@ import { cn } from "@/lib/utils";
 import { useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 
-const ALLOCATION_OWNER_EMAIL = "chanuadmin@rit.edu";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
@@ -50,9 +49,9 @@ const menuItems = [
 
 const Sidebar = () => {
   const location = useLocation();
-  const { user } = useAuth();
+  const { isAdmin } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
-  const canAccessAllocationModule = user?.email?.toLowerCase() === ALLOCATION_OWNER_EMAIL;
+  const canAccessAllocationModule = isAdmin();
 
   const visibleMenuItems = canAccessAllocationModule
     ? [
