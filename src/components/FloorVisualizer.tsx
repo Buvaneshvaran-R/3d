@@ -4,17 +4,27 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
 interface FloorVisualizerProps {
   buildingId: string;
   floorNumber: number;
   allocations?: Allocation[];
   externalTeacherQuery?: string;
+  isAdmin?: boolean;
+  onAdminRoomAction?: (payload: {
+    action: 'book' | 'takeover' | 'unbook';
+    buildingId: string;
+    floorNumber: number;
+    roomNumber: number;
+    allocation?: Allocation;
+  }) => Promise<void> | void;
 }
 
 interface Allocation {
   classroom_id: string;
   building_id: string;
+  floor_number?: number;
   room_number: number;
   allocated_staff: string;
   subject: string;
@@ -23,6 +33,9 @@ interface Allocation {
   time_end: string;
   is_staff_present: boolean;
   substitute_staff?: string;
+  session_status?: string;
+  department?: string | null;
+  teacher_user_id?: string;
 }
 
 interface BuildingMesh extends THREE.Group {
@@ -34,6 +47,7 @@ interface BuildingMesh extends THREE.Group {
 interface WindowMesh extends THREE.Mesh {
   userData: {
     buildingId: string;
+    floorNumber: number;
     roomNumber: number;
     isBooked: boolean;
   };
@@ -50,6 +64,7 @@ interface WindowMesh extends THREE.Mesh {
 // Building A: RIT Block (Blue glass, alternating stripes, red borders)
 function createSmartAcademicBlock(scene, bld, bodyMap) {
   const group = new THREE.Group();
+  group.userData.buildingId = 'A';
   const width = 36;
   const height = 24;
   const depth = 16;
@@ -117,6 +132,7 @@ function createSmartAcademicBlock(scene, bld, bodyMap) {
 // Building B: White classic structure with multiple pillars
 function createSmartMainBlock(scene, bld, bodyMap) {
   const group = new THREE.Group();
+  group.userData.buildingId = 'B';
   const width = 45;
   const height = 30;
   const depth = 20;
@@ -199,6 +215,7 @@ function createSmartMainBlock(scene, bld, bodyMap) {
 // Building C: Brown and White with stairs/ramp
 function createSmartAuditorium(scene, bld, bodyMap) {
   const group = new THREE.Group();
+  group.userData.buildingId = 'C';
   const width = 36;
   const height = 22;
   const depth = 18;
@@ -293,6 +310,8 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
   floorNumber,
   allocations = [],
   externalTeacherQuery,
+  isAdmin = false,
+  onAdminRoomAction,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -301,30 +320,529 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
   const raycasterRef = useRef<THREE.Raycaster>(new THREE.Raycaster());
   const mouseRef = useRef<THREE.Vector2>(new THREE.Vector2());
   const windowMeshesRef = useRef<Map<string, WindowMesh>>(new Map());
+  const cameraStateRef = useRef<
+    Record<string, { targetX: number; targetY: number; targetZ: number; radius: number; theta: number; phi: number }>
+  >({});
   
   const [selectedRoom, setSelectedRoom] = useState<{ 
     buildingId: string; 
+    floorNumber: number;
     roomNumber: number; 
     isBooked: boolean;
     allocation?: Allocation;
   } | null>(null);
   const [teacherQuery, setTeacherQuery] = useState('');
+  const [isApplyingRoomAction, setIsApplyingRoomAction] = useState(false);
 
-  const highlightRoomWindow = (building: string, room: number) => {
-    windowMeshesRef.current.forEach((mesh, key) => {
-      const mat = mesh.material as THREE.MeshPhongMaterial;
-      const allocation = allocations.find(a => a.building_id === mesh.userData.buildingId && a.room_number === mesh.userData.roomNumber);
-      const hasPresentTeacher = !!allocation?.is_staff_present;
+  const getStatusColor = (status: string) => {
+    if (status === 'OCCUPIED') return 0x3b82f6; // teacher present
+    if (status === 'SCHEDULED' || status === 'UNATTENDED') return 0xef4444; // allocated, teacher absent
+    return 0x22c55e; // free/other
+  };
 
-      mat.color.setHex(hasPresentTeacher ? 0xf59e0b : 0x87CEEB);
-      mat.emissive.setHex(hasPresentTeacher ? 0x8a4b00 : 0xccffff);
-      mat.emissiveIntensity = hasPresentTeacher ? 0.32 : 0.2;
+  const getAllocationStatus = (allocation?: Allocation) => {
+    if (!allocation) return 'FREE';
+    return allocation.is_staff_present ? 'OCCUPIED' : 'SCHEDULED';
+  };
 
-      if (key === `${building}-${room}`) {
-        mat.color.setHex(0x22c55e);
-        mat.emissive.setHex(0x14532d);
-        mat.emissiveIntensity = 0.45;
+  const matchesAllocation = (
+    allocation: Allocation,
+    roomBuildingId: string,
+    roomFloor: number,
+    roomNumber: number
+  ) => {
+    const allocationBuilding = String(allocation.building_id || '').trim().toUpperCase();
+    const roomBuilding = roomBuildingId.trim().toUpperCase();
+    if (allocationBuilding !== roomBuilding) {
+      return false;
+    }
+
+    const directRoomMatch = allocation.room_number === roomNumber;
+    const compositeRoomMatch = allocation.room_number === roomFloor * 100 + roomNumber;
+    if (!directRoomMatch && !compositeRoomMatch) {
+      return false;
+    }
+
+    if (typeof allocation.floor_number !== 'number') {
+      return true;
+    }
+
+    return allocation.floor_number === roomFloor;
+  };
+
+  const createSkeletalBlock = (
+    scene: THREE.Scene,
+    x: number,
+    z: number,
+    width: number,
+    depth: number,
+    height: number,
+    color: number,
+    label: string
+  ) => {
+    const group = new THREE.Group();
+    group.position.set(x, 0, z);
+    const focusedFloor = floorNumber >= 0 ? floorNumber : null;
+
+    const blockIdByLabel: Record<string, string> = {
+      '1': 'A',
+      '2': 'B',
+      '3': 'C',
+    };
+    const buildingRef = blockIdByLabel[label] || label;
+
+    const layoutByBuilding: Record<
+      string,
+      {
+        floors: number;
+        roomsPerFloor: number;
+        mode: 'line' | 'ring';
+        skipGroundFloor: boolean;
       }
+    > = {
+      A: { floors: 4, roomsPerFloor: 8, mode: 'ring', skipGroundFloor: false },
+      B: { floors: 4, roomsPerFloor: 7, mode: 'line', skipGroundFloor: false },
+      C: { floors: 8, roomsPerFloor: 7, mode: 'line', skipGroundFloor: false },
+    };
+    const layout = layoutByBuilding[buildingRef] || layoutByBuilding['A'];
+
+    const block3Template: string[][] = buildingRef === 'A'
+      ? [
+          ['0', '0', '0', '3', 'sr', '2'],
+          ['0', 'S', '4', 'O', 'p', '1'],
+          ['0', 'p', 'p', 'p', 'p', 'sr'],
+          ['sr', 'p', 'O', '8', '0', '0'],
+          ['6', 'sr', '7', '0', 's', 'L'],
+        ]
+      : [];
+
+    const outline = new THREE.Mesh(
+      new THREE.BoxGeometry(width, height, depth),
+      new THREE.MeshBasicMaterial({ color, wireframe: true, transparent: true, opacity: 0.95 })
+    );
+    outline.position.y = height / 2;
+    group.add(outline);
+
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(width * 0.96, height * 0.96, depth * 0.96),
+      new THREE.MeshStandardMaterial({
+        color,
+        transparent: true,
+        opacity: 0.12,
+        roughness: 0.95,
+        metalness: 0.02,
+        depthWrite: false,
+      })
+    );
+    body.position.y = height / 2;
+    group.add(body);
+
+    const floorCount = Math.max(layout.floors, 2);
+    const slabThickness = 0.15;
+    for (let floorIndex = 1; floorIndex < floorCount; floorIndex += 1) {
+      const slabY = floorIndex * (height / floorCount);
+      if (buildingRef === 'A' && block3Template.length > 0) {
+        const rows = block3Template.length;
+        const cols = block3Template[0].length;
+        const usableWidth = width * 0.94;
+        const usableDepth = depth * 0.94;
+        const tileW = usableWidth / cols;
+        const tileD = usableDepth / rows;
+
+        for (let r = 0; r < rows; r += 1) {
+          for (let c = 0; c < cols; c += 1) {
+            const token = block3Template[r][c];
+            if (token.toLowerCase() === 'o') {
+              continue;
+            }
+
+            const slabTile = new THREE.Mesh(
+              new THREE.BoxGeometry(tileW * 0.96, slabThickness, tileD * 0.96),
+              new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.26 })
+            );
+            const tx = -usableWidth / 2 + c * tileW + tileW / 2;
+            const tz = -usableDepth / 2 + r * tileD + tileD / 2;
+            slabTile.position.set(tx, slabY, tz);
+            group.add(slabTile);
+          }
+        }
+      } else {
+        const slab = new THREE.Mesh(
+          new THREE.BoxGeometry(width * 0.98, slabThickness, depth * 0.98),
+          new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.26 })
+        );
+        slab.position.y = slabY;
+        group.add(slab);
+      }
+    }
+
+    const floorBand = height / layout.floors;
+    const classroomMaterial = new THREE.MeshPhongMaterial({
+      color: 0x3b82f6,
+      emissive: 0x3b82f6,
+      emissiveIntensity: 0.22,
+      transparent: true,
+      opacity: 0.9,
+      shininess: 90,
+    });
+
+    const getRoomColor = (roomNumber: number, floorForRoom: number) => {
+      const allocation = allocations.find((a) =>
+        matchesAllocation(a, buildingRef, floorForRoom, roomNumber)
+      );
+      const status = getAllocationStatus(allocation);
+      return getStatusColor(status);
+    };
+
+    const spawnClassroom = (
+      roomNumber: number,
+      floorForRoom: number,
+      cx: number,
+      cy: number,
+      cz: number,
+      roomWidth: number,
+      roomHeight: number,
+      roomDepth: number
+    ) => {
+      const roomColor = getRoomColor(roomNumber, floorForRoom);
+      const roomMat = classroomMaterial.clone();
+      roomMat.color.setHex(roomColor);
+      roomMat.emissive.setHex(roomColor);
+      roomMat.emissiveIntensity = roomColor === 0x22c55e ? 0.14 : 0.3;
+
+      const classroom = (new THREE.Mesh(
+        new THREE.BoxGeometry(roomWidth, roomHeight, roomDepth),
+        roomMat
+      ) as unknown) as WindowMesh;
+
+      classroom.userData = {
+        buildingId: buildingRef,
+        floorNumber: floorForRoom,
+        roomNumber,
+        isBooked: allocations.some((a) => matchesAllocation(a, buildingRef, floorForRoom, roomNumber)),
+      };
+
+      classroom.position.set(cx, cy, cz);
+      classroom.castShadow = true;
+      classroom.receiveShadow = true;
+      group.add(classroom);
+      windowMeshesRef.current.set(`${buildingRef}-${floorForRoom}-${roomNumber}`, classroom);
+    };
+
+    for (let floorIndex = 0; floorIndex < layout.floors; floorIndex += 1) {
+      if (focusedFloor !== null && floorIndex !== focusedFloor) {
+        continue;
+      }
+
+      if (layout.skipGroundFloor && floorIndex === 0) {
+        continue;
+      }
+
+      const floorBaseY = floorIndex * floorBand;
+      const roomHeight = Math.max(1.7, floorBand * 0.46);
+      const roomCenterY = floorBaseY + slabThickness + roomHeight / 2 + 0.25;
+
+      const spawnUtilityCell = (
+        cx: number,
+        cz: number,
+        cellWidth: number,
+        cellDepth: number,
+        cellHeight: number,
+        cellColor: number,
+        cellOpacity: number
+      ) => {
+        const cell = new THREE.Mesh(
+          new THREE.BoxGeometry(cellWidth, cellHeight, cellDepth),
+          new THREE.MeshStandardMaterial({
+            color: cellColor,
+            transparent: true,
+            opacity: cellOpacity,
+            roughness: 0.8,
+            metalness: 0.1,
+          })
+        );
+        cell.position.set(cx, roomCenterY, cz);
+        group.add(cell);
+      };
+
+      const spawnUtilityLabel = (cx: number, cy: number, cz: number, text: string, bg = 'rgba(15, 23, 42, 0.82)') => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 96;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, 256, 96);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 34px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, 128, 48);
+        const texture = new THREE.CanvasTexture(canvas);
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false }));
+        sprite.scale.set(3.8, 1.45, 1);
+        sprite.position.set(cx, cy, cz);
+        group.add(sprite);
+      };
+
+      const spawnVerticalStack = (
+        cx: number,
+        cz: number,
+        stackWidth: number,
+        stackDepth: number,
+        stackColor: number,
+        stackOpacity: number
+      ) => {
+        const shaftHeight = Math.max(2, height * 0.94);
+        const shaft = new THREE.Mesh(
+          new THREE.BoxGeometry(stackWidth, shaftHeight, stackDepth),
+          new THREE.MeshStandardMaterial({
+            color: stackColor,
+            transparent: true,
+            opacity: stackOpacity,
+            roughness: 0.72,
+            metalness: 0.12,
+          })
+        );
+        shaft.position.set(cx, shaftHeight / 2, cz);
+        group.add(shaft);
+      };
+
+      if (layout.mode === 'line') {
+        const roomWidth = width * 0.1;
+        const roomDepth = Math.min(depth * 0.3, 4.2);
+
+        if (buildingRef === 'B' || buildingRef === 'C') {
+          const leftCount = buildingRef === 'C' ? 4 : 3;
+          const rightCount = buildingRef === 'C' ? 3 : 4;
+          const centerGap = 1.15;
+          const edgeMargin = 1.1;
+          const roomGap = 0.9;
+          const stairWidth = width * 0.14;
+
+          const leftZoneStart = -width / 2 + edgeMargin;
+          const leftZoneEnd = -stairWidth / 2 - centerGap;
+          const rightZoneStart = stairWidth / 2 + centerGap;
+          const rightZoneEnd = width / 2 - edgeMargin;
+
+          const leftZoneWidth = Math.max(0, leftZoneEnd - leftZoneStart);
+          const rightZoneWidth = Math.max(0, rightZoneEnd - rightZoneStart);
+
+          const leftRoomWidth = (leftZoneWidth - roomGap * (leftCount - 1)) / leftCount;
+          const rightRoomWidth = (rightZoneWidth - roomGap * (rightCount - 1)) / rightCount;
+          const blockRoomWidth = Math.max(2.6, Math.min(leftRoomWidth, rightRoomWidth));
+
+          const leftUsedWidth = leftCount * blockRoomWidth + roomGap * (leftCount - 1);
+          const rightUsedWidth = rightCount * blockRoomWidth + roomGap * (rightCount - 1);
+          const leftStart = leftZoneStart + Math.max(0, (leftZoneWidth - leftUsedWidth) / 2);
+          const rightStart = rightZoneStart + Math.max(0, (rightZoneWidth - rightUsedWidth) / 2);
+
+          const buildCenters = (start: number, count: number) => {
+            const centers: number[] = [];
+            for (let i = 0; i < count; i += 1) {
+              centers.push(start + blockRoomWidth / 2 + i * (blockRoomWidth + roomGap));
+            }
+            return centers;
+          };
+
+          const leftSlots = buildCenters(leftStart, leftCount);
+          const rightSlots = buildCenters(rightStart, rightCount);
+          const classZ = depth / 2 - roomDepth * 0.58;
+
+          if (buildingRef === 'C') {
+            const orderedSlots = [...leftSlots, ...rightSlots].sort((a, b) => b - a);
+            for (let i = 0; i < orderedSlots.length; i += 1) {
+              const roomNumber = i + 1;
+              spawnClassroom(roomNumber, floorIndex, orderedSlots[i], roomCenterY, classZ, blockRoomWidth, roomHeight, roomDepth);
+            }
+          } else {
+            for (let i = 0; i < leftSlots.length; i += 1) {
+              const roomNumber = i + 1;
+              spawnClassroom(roomNumber, floorIndex, leftSlots[i], roomCenterY, classZ, blockRoomWidth, roomHeight, roomDepth);
+            }
+
+            for (let i = 0; i < rightSlots.length; i += 1) {
+              const roomNumber = leftSlots.length + i + 1;
+              spawnClassroom(roomNumber, floorIndex, rightSlots[i], roomCenterY, classZ, blockRoomWidth, roomHeight, roomDepth);
+            }
+          }
+
+          if (focusedFloor === null ? floorIndex === 0 : floorIndex === focusedFloor) {
+            const stairCore = new THREE.Mesh(
+              new THREE.BoxGeometry(stairWidth, height * 0.95, depth * 0.34),
+              new THREE.MeshStandardMaterial({
+                color: 0xcbd5e1,
+                transparent: true,
+                opacity: 0.28,
+                roughness: 0.75,
+                metalness: 0.08,
+              })
+            );
+            stairCore.position.set(0, height * 0.48, classZ);
+            group.add(stairCore);
+
+            for (let s = 0; s < layout.floors * 3; s += 1) {
+              const step = new THREE.Mesh(
+                new THREE.BoxGeometry(width * 0.11, 0.18, depth * 0.05),
+                new THREE.MeshStandardMaterial({ color: 0x94a3b8, transparent: true, opacity: 0.8 })
+              );
+              step.position.set(
+                0,
+                0.35 + s * (floorBand / 3),
+                classZ - depth * 0.07 + (s % 3) * (depth * 0.03)
+              );
+              group.add(step);
+            }
+          }
+        } else {
+          const spacing = width / (layout.roomsPerFloor + 1);
+          for (let room = 1; room <= layout.roomsPerFloor; room += 1) {
+            spawnClassroom(
+              room,
+              floorIndex,
+              -width / 2 + spacing * room,
+              roomCenterY,
+              depth / 2 - roomDepth * 0.55,
+              roomWidth,
+              roomHeight,
+              roomDepth
+            );
+          }
+        }
+      } else {
+        if (buildingRef === 'A' && block3Template.length > 0) {
+          const rows = block3Template.length;
+          const cols = block3Template[0].length;
+          const usableWidth = width * 0.9;
+          const usableDepth = depth * 0.9;
+          const cellW = usableWidth / cols;
+          const cellD = usableDepth / rows;
+          const classW = cellW * 0.86;
+          const classD = cellD * 0.84;
+          const classH = Math.max(1.5, floorBand * 0.42);
+
+          for (let r = 0; r < rows; r += 1) {
+            for (let c = 0; c < cols; c += 1) {
+              const token = block3Template[r][c];
+              const normalized = token.toLowerCase();
+              const px = -usableWidth / 2 + c * cellW + cellW / 2;
+              const pz = -usableDepth / 2 + r * cellD + cellD / 2;
+
+              if (normalized === '0') {
+                continue;
+              }
+              if (normalized === 'o') {
+                continue;
+              }
+
+              if (/^[0-9]+$/.test(token)) {
+                const roomNumber = parseInt(token, 10);
+                spawnClassroom(roomNumber, floorIndex, px, roomCenterY, pz, classW, classH, classD);
+                continue;
+              }
+
+              if (normalized === 'sr') {
+                spawnUtilityCell(px, pz, classW, classH, classD, 0x14532d, 0.84);
+                if (floorIndex === layout.floors - 1) {
+                  spawnUtilityLabel(px, roomCenterY + classH * 0.75, pz, 'SR');
+                }
+                continue;
+              }
+
+              if (normalized === 'l') {
+                if (focusedFloor !== null) {
+                  continue;
+                }
+                if (focusedFloor === null ? floorIndex === 0 : floorIndex === focusedFloor) {
+                  spawnVerticalStack(px, pz, classW * 0.58, classD * 0.58, 0x000000, 0.92);
+                  spawnUtilityLabel(px, height + 1.5, pz, 'LIFT', 'rgba(0, 0, 0, 0.78)');
+                }
+                continue;
+              }
+
+              if (normalized === 's') {
+                if (focusedFloor !== null) {
+                  continue;
+                }
+                if (focusedFloor === null ? floorIndex === 0 : floorIndex === focusedFloor) {
+                  spawnVerticalStack(px, pz, classW * 0.64, classD * 0.64, 0x7e22ce, 0.88);
+                  spawnUtilityLabel(px, height + 1.5, pz, 'STAIRS', 'rgba(66, 18, 122, 0.78)');
+                }
+                continue;
+              }
+
+              if (normalized === 'p') {
+                const corridorTile = new THREE.Mesh(
+                  new THREE.BoxGeometry(classW * 0.92, 0.12, classD * 0.92),
+                  new THREE.MeshStandardMaterial({ color: 0x64748b, transparent: true, opacity: 0.42 })
+                );
+                corridorTile.position.set(px, floorBaseY + slabThickness + 0.1, pz);
+                group.add(corridorTile);
+              }
+            }
+          }
+
+          continue;
+        }
+
+        const roomHeight = Math.max(1.6, floorBand * 0.44);
+        const roomWidth = width * 0.2;
+        const roomDepth = depth * 0.2;
+        let ringRoom = 1;
+
+        for (let gx = 0; gx < 3; gx += 1) {
+          for (let gz = 0; gz < 3; gz += 1) {
+            if (gx === 1 && gz === 1) {
+              continue;
+            }
+
+            const px = -width * 0.34 + gx * width * 0.34;
+            const pz = -depth * 0.34 + gz * depth * 0.34;
+            spawnClassroom(ringRoom, floorIndex, px, roomCenterY, pz, roomWidth, roomHeight, roomDepth);
+            ringRoom += 1;
+          }
+        }
+      }
+    }
+
+    const labelCanvas = document.createElement('canvas');
+    labelCanvas.width = 320;
+    labelCanvas.height = 120;
+    const ctx = labelCanvas.getContext('2d');
+    if (ctx) {
+      ctx.fillStyle = 'rgba(10, 15, 25, 0.82)';
+      ctx.fillRect(0, 0, 320, 120);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 56px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, 160, 60);
+    }
+
+    const labelTexture = new THREE.CanvasTexture(labelCanvas);
+    const labelSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: labelTexture, transparent: true, depthWrite: false })
+    );
+    labelSprite.scale.set(7.5, 2.8, 1);
+    labelSprite.position.set(0, height + 2.6, 0);
+    group.add(labelSprite);
+
+    scene.add(group);
+    return group;
+  };
+
+  const highlightRoomWindow = () => {
+    windowMeshesRef.current.forEach((mesh) => {
+      const mat = mesh.material as THREE.MeshPhongMaterial;
+      const allocation = allocations.find((a) =>
+        matchesAllocation(a, mesh.userData.buildingId, mesh.userData.floorNumber, mesh.userData.roomNumber)
+      );
+      const status = getAllocationStatus(allocation);
+      const statusColor = getStatusColor(status);
+
+      mat.color.setHex(statusColor);
+      mat.emissive.setHex(statusColor);
+      mat.emissiveIntensity = status === 'FREE' ? 0.12 : 0.32;
     });
   };
 
@@ -355,16 +873,18 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
       for (let col = 0; col < roomsPerRow; col++) {
         const windowGeom = new THREE.BoxGeometry(windowWidth * 0.85, windowHeight * 0.85, windowDepth);
         const roomAllocation = allocations.find(a => a.building_id === buildingLabel && a.room_number === roomNumber);
-        const hasPresentTeacher = !!roomAllocation?.is_staff_present;
+        const roomStatus = getAllocationStatus(roomAllocation);
+        const roomColor = getStatusColor(roomStatus);
         const windowMat = new THREE.MeshPhongMaterial({ 
-          color: hasPresentTeacher ? 0xf59e0b : 0x87CEEB,
-          emissive: hasPresentTeacher ? 0x8a4b00 : 0xccffff,
-          emissiveIntensity: hasPresentTeacher ? 0.32 : 0.2,
+          color: roomColor,
+          emissive: roomColor,
+          emissiveIntensity: roomStatus === 'FREE' ? 0.12 : 0.32,
           shininess: 100
         });
         const windowMesh = (new THREE.Mesh(windowGeom, windowMat) as unknown) as WindowMesh;
         windowMesh.userData = {
           buildingId: buildingLabel,
+          floorNumber: row,
           roomNumber: roomNumber,
           isBooked: !!roomAllocation
         };
@@ -384,16 +904,18 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
       for (let col = 0; col < 3; col++) {
         const windowGeom = new THREE.BoxGeometry(windowDepth, windowHeight * 0.85, windowWidth * 0.85);
         const roomAllocation = allocations.find(a => a.building_id === buildingLabel && a.room_number === roomNumber);
-        const hasPresentTeacher = !!roomAllocation?.is_staff_present;
+        const roomStatus = getAllocationStatus(roomAllocation);
+        const roomColor = getStatusColor(roomStatus);
         const windowMat = new THREE.MeshPhongMaterial({ 
-          color: hasPresentTeacher ? 0xf59e0b : 0x87CEEB,
-          emissive: hasPresentTeacher ? 0x8a4b00 : 0xccffff,
-          emissiveIntensity: hasPresentTeacher ? 0.32 : 0.2,
+          color: roomColor,
+          emissive: roomColor,
+          emissiveIntensity: roomStatus === 'FREE' ? 0.12 : 0.32,
           shininess: 100
         });
         const windowMesh = (new THREE.Mesh(windowGeom, windowMat) as unknown) as WindowMesh;
         windowMesh.userData = {
           buildingId: buildingLabel,
+          floorNumber: row,
           roomNumber: roomNumber,
           isBooked: !!roomAllocation
         };
@@ -485,6 +1007,8 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
   useEffect(() => {
     if (!containerRef.current) return;
 
+    windowMeshesRef.current.clear();
+
     // Scene setup
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xadd8e6); // Light blue sky
@@ -494,8 +1018,8 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
     const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
     directionalLight.position.set(50, 60, 50);
     directionalLight.castShadow = true;
-    directionalLight.shadow.mapSize.width = 4096;
-    directionalLight.shadow.mapSize.height = 4096;
+    directionalLight.shadow.mapSize.width = 2048;
+    directionalLight.shadow.mapSize.height = 2048;
     directionalLight.shadow.camera.left = -400;
     directionalLight.shadow.camera.right = 400;
     directionalLight.shadow.camera.top = 400;
@@ -517,13 +1041,22 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
     camera.position.set(35, 45, 45);
     camera.lookAt(0, 0, 0);
     cameraRef.current = camera;
+    const cameraTarget = new THREE.Vector3(0, 0, 0);
+    const cameraStateKey = buildingId === 'dummy' ? 'dummy' : buildingId;
+    let orbitOffset = camera.position.clone().sub(cameraTarget);
+    let orbitRadius = orbitOffset.length();
+    let orbitTheta = Math.atan2(orbitOffset.z, orbitOffset.x);
+    let orbitPhi = Math.acos(orbitOffset.y / orbitRadius);
+    let targetRadius = orbitRadius;
+    let targetTheta = orbitTheta;
+    let targetPhi = orbitPhi;
 
     // Renderer
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     containerRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
@@ -617,9 +1150,55 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
     // Create buildings with windows
     
     // ADD SMART BUILDINGS
-    createSmartAcademicBlock(scene, null, null);
-    createSmartMainBlock(scene, null, null);
-    createSmartAuditorium(scene, null, null);
+    const academicBlock = createSmartAcademicBlock(scene, null, null);
+    const mainBlock = createSmartMainBlock(scene, null, null);
+    const auditoriumBlock = createSmartAuditorium(scene, null, null);
+
+    const activeBuildingId = buildingId === 'dummy' ? null : buildingId;
+    const buildingBlocks = [academicBlock, mainBlock, auditoriumBlock];
+    const skeletalPalette: Record<string, { color: number; label: string; x: number; width: number; depth: number; height: number }> = {
+      A: { color: 0x4f83cc, label: 'A', x: -80, width: 26, depth: 18, height: 30 },
+      B: { color: 0xb8a27a, label: 'B', x: 0, width: 44, depth: 20, height: 34 },
+      C: { color: 0xcc6b4a, label: 'C', x: 80, width: 34, depth: 20, height: 36 },
+    };
+
+    if (activeBuildingId) {
+      buildingBlocks.forEach((block) => {
+        block.visible = false;
+      });
+
+      const spec = skeletalPalette[activeBuildingId];
+      if (spec) {
+        createSkeletalBlock(scene, spec.x, 0, spec.width, spec.depth, spec.height, spec.color, spec.label);
+        const savedState = cameraStateRef.current[cameraStateKey];
+        if (savedState) {
+          cameraTarget.set(savedState.targetX, savedState.targetY, savedState.targetZ);
+          orbitRadius = savedState.radius;
+          orbitTheta = savedState.theta;
+          orbitPhi = savedState.phi;
+          targetRadius = orbitRadius;
+          targetTheta = orbitTheta;
+          targetPhi = orbitPhi;
+          const restoredOffset = new THREE.Vector3(
+            orbitRadius * Math.sin(orbitPhi) * Math.cos(orbitTheta),
+            orbitRadius * Math.cos(orbitPhi),
+            orbitRadius * Math.sin(orbitPhi) * Math.sin(orbitTheta)
+          );
+          camera.position.copy(cameraTarget.clone().add(restoredOffset));
+        } else {
+          camera.position.set(spec.x + 36, 48, 46);
+          cameraTarget.set(spec.x, 12, 0);
+          orbitOffset = camera.position.clone().sub(cameraTarget);
+          orbitRadius = orbitOffset.length();
+          orbitTheta = Math.atan2(orbitOffset.z, orbitOffset.x);
+          orbitPhi = Math.acos(orbitOffset.y / orbitRadius);
+          targetRadius = orbitRadius;
+          targetTheta = orbitTheta;
+          targetPhi = orbitPhi;
+        }
+        camera.lookAt(cameraTarget);
+      }
+    }
 
     
 
@@ -663,15 +1242,18 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
         const roomData = clickedWindow.userData;
         
         // Find allocation for this classroom if exists
-        const allocation = allocations.find((a) => a.room_number === roomData.roomNumber && a.building_id === roomData.buildingId);
+        const allocation = allocations.find((a) =>
+          matchesAllocation(a, roomData.buildingId, roomData.floorNumber, roomData.roomNumber)
+        );
         
         setSelectedRoom({
           buildingId: roomData.buildingId,
+          floorNumber: roomData.floorNumber,
           roomNumber: roomData.roomNumber,
           isBooked: !!allocation,
           allocation: allocation
         });
-        highlightRoomWindow(roomData.buildingId, roomData.roomNumber);
+        highlightRoomWindow();
       } else {
         setSelectedRoom(null);
       }
@@ -682,10 +1264,7 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
     // Mouse wheel zoom
     const onMouseWheel = (event: WheelEvent) => {
       event.preventDefault();
-      const currentDistance = camera.position.length();
-      const newDistance = Math.max(40, Math.min(160, currentDistance + event.deltaY * 0.05));
-      const direction = camera.position.clone().normalize();
-      camera.position.copy(direction.multiplyScalar(newDistance));
+      targetRadius = Math.max(32, Math.min(180, targetRadius + event.deltaY * 0.05));
     };
 
     renderer.domElement.addEventListener('wheel', onMouseWheel, { passive: false });
@@ -706,19 +1285,9 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
       const deltaY = e.clientY - previousMousePosition.y;
       previousMousePosition = { x: e.clientX, y: e.clientY };
 
-      // Rotate camera around the scene
-      const radius = camera.position.length();
-      let theta = Math.atan2(camera.position.z, camera.position.x);
-      let phi = Math.acos(camera.position.y / radius);
-
-      theta -= deltaX * 0.005;
-      phi += deltaY * 0.005;
-      phi = Math.max(0.1, Math.min(Math.PI - 0.1, phi));
-
-      camera.position.x = radius * Math.sin(phi) * Math.cos(theta);
-      camera.position.y = radius * Math.cos(phi);
-      camera.position.z = radius * Math.sin(phi) * Math.sin(theta);
-      camera.lookAt(0, 0, 0);
+      targetTheta -= deltaX * 0.0042;
+      targetPhi += deltaY * 0.0042;
+      targetPhi = Math.max(0.22, Math.min(Math.PI - 0.22, targetPhi));
     };
 
     const onMouseUp = () => {
@@ -733,6 +1302,28 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
     let animationFrameId: number;
     const animate = () => {
       animationFrameId = requestAnimationFrame(animate);
+
+      orbitRadius += (targetRadius - orbitRadius) * 0.14;
+      orbitTheta += (targetTheta - orbitTheta) * 0.18;
+      orbitPhi += (targetPhi - orbitPhi) * 0.18;
+
+      const smoothedOffset = new THREE.Vector3(
+        orbitRadius * Math.sin(orbitPhi) * Math.cos(orbitTheta),
+        orbitRadius * Math.cos(orbitPhi),
+        orbitRadius * Math.sin(orbitPhi) * Math.sin(orbitTheta)
+      );
+      camera.position.copy(cameraTarget.clone().add(smoothedOffset));
+      camera.lookAt(cameraTarget);
+
+      cameraStateRef.current[cameraStateKey] = {
+        targetX: cameraTarget.x,
+        targetY: cameraTarget.y,
+        targetZ: cameraTarget.z,
+        radius: orbitRadius,
+        theta: orbitTheta,
+        phi: orbitPhi,
+      };
+
       renderer.render(scene, camera);
     };
 
@@ -774,13 +1365,24 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
       );
 
   const handleTeacherSelect = (allocation: Allocation) => {
+    const floorFromClassroomId = allocation.classroom_id.match(/-F(\d+)-/i);
+    const detectedFloor =
+      typeof allocation.floor_number === 'number'
+        ? allocation.floor_number
+        : floorFromClassroomId
+          ? Number(floorFromClassroomId[1])
+          : floorNumber >= 0
+            ? floorNumber
+            : 0;
+    const displayRoomNumber = allocation.room_number >= 100 ? allocation.room_number % 100 : allocation.room_number;
     setSelectedRoom({
       buildingId: allocation.building_id,
-      roomNumber: allocation.room_number,
+      floorNumber: detectedFloor,
+      roomNumber: displayRoomNumber,
       isBooked: true,
       allocation,
     });
-    highlightRoomWindow(allocation.building_id, allocation.room_number);
+    highlightRoomWindow();
     setTeacherQuery(allocation.allocated_staff);
   };
 
@@ -796,6 +1398,12 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
       handleTeacherSelect(match);
     }
   }, [externalTeacherQuery, allocations]);
+
+  const selectedRoomCode = selectedRoom
+    ? `${selectedRoom.buildingId}-${selectedRoom.floorNumber}${String(selectedRoom.roomNumber).padStart(2, '0')}`
+    : null;
+
+  const selectedRoomStatus = selectedRoom ? getAllocationStatus(selectedRoom.allocation) : 'FREE';
 
   return (
     <div
@@ -828,19 +1436,19 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
           <Card className="bg-white dark:bg-slate-900">
             <CardHeader>
               <CardTitle className="text-lg">
-                Room {selectedRoom.roomNumber}
+                {selectedRoomCode}
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <p className="text-sm text-muted-foreground">Building</p>
-                <p className="text-lg font-semibold">Block {selectedRoom.buildingId}</p>
+                <p className="text-sm text-muted-foreground">Classroom Code</p>
+                <p className="text-lg font-semibold">{selectedRoomCode}</p>
               </div>
               
               <div>
                 <p className="text-sm text-muted-foreground">Status</p>
-                <Badge className={selectedRoom.isBooked ? "bg-red-500" : "bg-green-500"}>
-                  {selectedRoom.isBooked ? "🔴 Occupied" : "🟢 Available"}
+                <Badge className={selectedRoomStatus === "OCCUPIED" ? "bg-blue-500" : selectedRoomStatus === "SCHEDULED" ? "bg-red-500" : "bg-green-500"}>
+                  {selectedRoomStatus === "OCCUPIED" ? "OCCUPIED" : selectedRoomStatus === "SCHEDULED" ? "ALLOCATED" : "FREE"}
                 </Badge>
               </div>
 
@@ -858,6 +1466,11 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
                   <div>
                     <p className="text-sm text-muted-foreground">Allocated Staff</p>
                     <p className="font-semibold">{selectedRoom.allocation.allocated_staff}</p>
+                  </div>
+
+                  <div>
+                    <p className="text-sm text-muted-foreground">Department</p>
+                    <p className="font-medium">{selectedRoom.allocation.department || "N/A"}</p>
                   </div>
                   
                   <div>
@@ -894,6 +1507,81 @@ export const FloorVisualizer: React.FC<FloorVisualizerProps> = ({
               {!selectedRoom.allocation && (
                 <div className="pt-2 border-t">
                   <p className="text-xs text-muted-foreground">No active allocation. Class is available for pickup.</p>
+                </div>
+              )}
+
+              {isAdmin && onAdminRoomAction && (
+                <div className="pt-2 border-t flex flex-wrap gap-2">
+                  {!selectedRoom.allocation && (
+                    <Button
+                      size="sm"
+                      disabled={isApplyingRoomAction}
+                      onClick={async () => {
+                        try {
+                          setIsApplyingRoomAction(true);
+                          await onAdminRoomAction({
+                            action: 'book',
+                            buildingId: selectedRoom.buildingId,
+                            floorNumber: selectedRoom.floorNumber,
+                            roomNumber: selectedRoom.roomNumber,
+                            allocation: selectedRoom.allocation,
+                          });
+                        } finally {
+                          setIsApplyingRoomAction(false);
+                        }
+                      }}
+                    >
+                      {isApplyingRoomAction ? 'Booking...' : 'Book Classroom'}
+                    </Button>
+                  )}
+
+                  {selectedRoom.allocation && !selectedRoom.allocation.is_staff_present && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={isApplyingRoomAction}
+                      onClick={async () => {
+                        try {
+                          setIsApplyingRoomAction(true);
+                          await onAdminRoomAction({
+                            action: 'takeover',
+                            buildingId: selectedRoom.buildingId,
+                            floorNumber: selectedRoom.floorNumber,
+                            roomNumber: selectedRoom.roomNumber,
+                            allocation: selectedRoom.allocation,
+                          });
+                        } finally {
+                          setIsApplyingRoomAction(false);
+                        }
+                      }}
+                    >
+                      {isApplyingRoomAction ? 'Updating...' : 'Mark Presence (Takeover)'}
+                    </Button>
+                  )}
+
+                  {selectedRoom.allocation && (
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={isApplyingRoomAction}
+                      onClick={async () => {
+                        try {
+                          setIsApplyingRoomAction(true);
+                          await onAdminRoomAction({
+                            action: 'unbook',
+                            buildingId: selectedRoom.buildingId,
+                            floorNumber: selectedRoom.floorNumber,
+                            roomNumber: selectedRoom.roomNumber,
+                            allocation: selectedRoom.allocation,
+                          });
+                        } finally {
+                          setIsApplyingRoomAction(false);
+                        }
+                      }}
+                    >
+                      {isApplyingRoomAction ? 'Removing...' : 'Unbook'}
+                    </Button>
+                  )}
                 </div>
               )}
             </CardContent>

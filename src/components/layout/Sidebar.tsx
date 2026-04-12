@@ -22,6 +22,9 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
+import { useAuth } from "@/contexts/AuthContext";
+
+const ALLOCATION_OWNER_EMAIL = "chanuadmin@rit.edu";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
@@ -47,7 +50,17 @@ const menuItems = [
 
 const Sidebar = () => {
   const location = useLocation();
+  const { user } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
+  const canAccessAllocationModule = user?.email?.toLowerCase() === ALLOCATION_OWNER_EMAIL;
+
+  const visibleMenuItems = canAccessAllocationModule
+    ? [
+        ...menuItems.slice(0, 16),
+        { icon: ClipboardList, label: "Classroom Allocation", path: "/classroom-allocation" },
+        ...menuItems.slice(16),
+      ]
+    : menuItems;
 
   return (
     <>
@@ -100,7 +113,7 @@ const Sidebar = () => {
         {/* Navigation */}
         <nav className="flex-1 overflow-y-auto py-4 px-3 scrollbar-thin scrollbar-thumb-sidebar-accent scrollbar-track-transparent">
           <ul className="space-y-1">
-            {menuItems.map((item) => {
+            {visibleMenuItems.map((item) => {
               const isActive = location.pathname === item.path;
               return (
                 <li key={item.path}>

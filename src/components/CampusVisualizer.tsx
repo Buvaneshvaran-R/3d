@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { Building, Room } from '@/types/campus';
 import { campusData, findTeacherByRoomId } from '@/data/campusData';
@@ -52,6 +52,42 @@ function getStatusHex(status: Room['occupancyStatus']): string {
   return '#22c55e';
 }
 
+function addRoofClassroomMarkers(group: THREE.Group, building: Building) {
+  const markerGeometry = new THREE.BoxGeometry(2.2, 0.45, 1.7);
+  const outlineGeometry = new THREE.EdgesGeometry(markerGeometry);
+
+  building.floors.forEach((floor) => {
+    const floorLift = floor.number * 0.28;
+    floor.rooms.forEach((room) => {
+      const roomColor = getRoomColor(room);
+      const marker = new THREE.Mesh(
+        markerGeometry,
+        new THREE.MeshStandardMaterial({
+          color: roomColor,
+          roughness: 0.45,
+          metalness: 0.08,
+          emissive: new THREE.Color(roomColor),
+          emissiveIntensity: 0.12,
+          transparent: true,
+          opacity: 0.98,
+          depthWrite: false,
+        })
+      );
+      marker.position.set(room.position.x, building.dimensions.height + 0.4 + floorLift, room.position.z);
+      marker.renderOrder = 20;
+      group.add(marker);
+
+      const outline = new THREE.LineSegments(
+        outlineGeometry,
+        new THREE.LineBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.35 })
+      );
+      outline.position.copy(marker.position);
+      outline.renderOrder = 21;
+      group.add(outline);
+    });
+  });
+}
+
 /* ─────────────── Camera utility ─────────────── */
 function applySpherical(
   cam: THREE.PerspectiveCamera,
@@ -80,6 +116,7 @@ export const CampusVisualizer: React.FC<CampusVisualizerProps> = ({
   /* mesh registries */
   const roomMeshes     = useRef<Map<string, RoomMesh>>(new Map());
   const buildingBodies = useRef<Map<string, BuildingBodyMesh>>(new Map());
+  const buildingGroups = useRef<Map<string, THREE.Group>>(new Map());
 
   /* spherical-coord camera state (smooth lerp) */
   const sph  = useRef({ theta: 0.6, phi: 0.88, r: 125 });
@@ -91,6 +128,17 @@ export const CampusVisualizer: React.FC<CampusVisualizerProps> = ({
   const drag = useRef({ on: false, lx: 0, ly: 0 });
 
   /* react ui */
+  const buildingTour = useMemo(
+    () => [
+      { label: "dummy", buildingId: null as string | null },
+      { label: "1", buildingId: "A" },
+      { label: "2", buildingId: "B" },
+      { label: "3", buildingId: "C" },
+      { label: "dummy", buildingId: null as string | null },
+    ],
+    []
+  );
+  const [activeTourIndex, setActiveTourIndex] = useState(0);
   const [tooltip, setTooltip] = useState<{
     room?: Room; building?: Building; mx: number; my: number;
   } | null>(null);
@@ -111,6 +159,61 @@ export const CampusVisualizer: React.FC<CampusVisualizerProps> = ({
     tSph.current.r     = 78;
     tLookAt.current.set(bx, 10, bz);
   }, [highlightedRoom]);
+
+  useEffect(() => {
+    const tourStop = buildingTour[activeTourIndex];
+
+    if (!tourStop.buildingId) {
+      buildingGroups.current.forEach((group) => {
+        group.visible = true;
+        group.traverse((obj) => {
+          const mesh = obj as THREE.Mesh;
+          if (mesh.isMesh && mesh.material) {
+            const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+            materials.forEach((material) => {
+              const standard = material as THREE.MeshStandardMaterial;
+              if (standard.opacity !== undefined) {
+                standard.transparent = true;
+                standard.opacity = 1;
+              }
+            });
+          }
+        });
+      });
+      tLookAt.current.set(0, 10, 0);
+      tSph.current.theta = 0.6;
+      tSph.current.phi = 0.88;
+      tSph.current.r = 125;
+      return;
+    }
+
+    buildingGroups.current.forEach((group, buildingId) => {
+      const isActive = buildingId === tourStop.buildingId;
+      group.visible = true;
+      group.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.material) return;
+        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        materials.forEach((material) => {
+          const standard = material as THREE.MeshStandardMaterial;
+          if (standard.opacity !== undefined) {
+            standard.transparent = true;
+            standard.opacity = isActive ? 1 : 0.12;
+          }
+        });
+      });
+    });
+
+    const selected = campusData.buildings.find((b) => b.id === tourStop.buildingId);
+    if (selected) {
+      tLookAt.current.set(selected.position.x, 10, selected.position.z);
+      tSph.current.theta = Math.atan2(selected.position.x + 0.001, selected.position.z + 55);
+      tSph.current.phi = 0.72;
+      tSph.current.r = 72;
+      onBuildingSelect?.(selected);
+    }
+    setPanel(null);
+  }, [activeTourIndex, buildingTour, onBuildingSelect]);
 
   /* ── One-time scene setup ── */
   useEffect(() => {
@@ -222,7 +325,7 @@ export const CampusVisualizer: React.FC<CampusVisualizerProps> = ({
     borderTrees.forEach(([tx, tz]) => addTree(scene, tx, tz, 0.85 + Math.random() * 0.3));
 
     /* Buildings */
-    campusData.buildings.forEach(b => buildBuilding(scene, b, roomMeshes.current, buildingBodies.current));
+    campusData.buildings.forEach(b => buildBuilding(scene, b, roomMeshes.current, buildingBodies.current, buildingGroups.current));
 
     /* Lamp posts */
     addLampPosts(scene);
@@ -372,6 +475,58 @@ export const CampusVisualizer: React.FC<CampusVisualizerProps> = ({
   /* ─────────────── JSX ─────────────── */
   return (
     <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}>
+
+      <div style={{
+        position: 'absolute',
+        top: 14,
+        left: 14,
+        zIndex: 80,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        background: 'rgba(8,10,20,0.72)',
+        color: '#fff',
+        border: '1px solid rgba(255,255,255,0.12)',
+        borderRadius: 999,
+        padding: '8px 10px',
+        backdropFilter: 'blur(6px)',
+      }}>
+        <button
+          onClick={() => setActiveTourIndex((current) => (current - 1 + buildingTour.length) % buildingTour.length)}
+          style={{
+            width: 34,
+            height: 34,
+            borderRadius: 999,
+            border: 'none',
+            background: '#ffffff',
+            color: '#111827',
+            fontSize: 18,
+            cursor: 'pointer',
+          }}
+          aria-label="Previous building"
+        >
+          ‹
+        </button>
+        <div style={{ minWidth: 92, textAlign: 'center', fontSize: 12, fontWeight: 700, letterSpacing: 0.5 }}>
+          {buildingTour[activeTourIndex].label}
+        </div>
+        <button
+          onClick={() => setActiveTourIndex((current) => (current + 1) % buildingTour.length)}
+          style={{
+            width: 34,
+            height: 34,
+            borderRadius: 999,
+            border: 'none',
+            background: '#ffffff',
+            color: '#111827',
+            fontSize: 18,
+            cursor: 'pointer',
+          }}
+          aria-label="Next building"
+        >
+          ›
+        </button>
+      </div>
 
       {/* Hover tooltip */}
       {tooltip && (
@@ -544,7 +699,13 @@ function createSmartAcademicBlock(scene, bld, bodyMap) {
   else group.position.set(-80, 0, 0);
 
   // Main back/base shell
-  const shellMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 });
+  const shellMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.9,
+    transparent: true,
+    opacity: 0.18,
+    depthWrite: false,
+  });
   const shell = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), shellMat);
   shell.position.y = height / 2;
   shell.castShadow = true; shell.receiveShadow = true;
@@ -589,6 +750,10 @@ function createSmartAcademicBlock(scene, bld, bodyMap) {
   roofTrim.position.y = height + 0.5;
   group.add(roofTrim);
 
+  if (bld) {
+    addRoofClassroomMarkers(group, bld);
+  }
+
   // Bottom entrance
   const entrance = new THREE.Mesh(new THREE.BoxGeometry(6, 4, depth + 0.4), blueStripeMat);
   entrance.position.set(-width/4, 2, 0);
@@ -611,7 +776,13 @@ function createSmartMainBlock(scene, bld, bodyMap) {
   if(bld) group.position.set(bld.position.x, bld.position.y, bld.position.z);
   else group.position.set(0, 0, 0);
 
-  const shellMat = new THREE.MeshStandardMaterial({ color: 0xf5f5f5, roughness: 0.9 });
+  const shellMat = new THREE.MeshStandardMaterial({
+    color: 0xf5f5f5,
+    roughness: 0.9,
+    transparent: true,
+    opacity: 0.16,
+    depthWrite: false,
+  });
   const shell = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), shellMat);
   shell.position.y = height / 2;
   shell.castShadow = true; shell.receiveShadow = true;
@@ -662,6 +833,10 @@ function createSmartMainBlock(scene, bld, bodyMap) {
   entrance.add(arch2b);
 
   group.add(entrance);
+
+  if (bld) {
+    addRoofClassroomMarkers(group, bld);
+  }
 
   // Side Entrances
   for (let sx of [-16, 16]) {
@@ -770,6 +945,10 @@ function createSmartAuditorium(scene, bld, bodyMap) {
   ramp.position.set(width*0.1, 0.6, depth/2 + 3);
   ramp.rotation.x = -Math.PI / 16;
   group.add(ramp);
+
+  if (bld) {
+    addRoofClassroomMarkers(group, bld);
+  }
 
   scene.add(group);
   return group;
@@ -1057,14 +1236,19 @@ function buildBuilding(
   scene: THREE.Scene,
   bld: Building,
   roomMap: Map<string, RoomMesh>,
-  bodyMap: Map<string, BuildingBodyMesh>
+  bodyMap: Map<string, BuildingBodyMesh>,
+  groupMap: Map<string, THREE.Group>
 ) {
+  let buildingGroup: THREE.Group | undefined;
   if (bld.id.includes('A')) {
-      createSmartAcademicBlock(scene, bld, bodyMap);
+      buildingGroup = createSmartAcademicBlock(scene, bld, bodyMap);
   } else if (bld.id.includes('B') || bld.id.includes('Main') || bld.id.includes('Admin')) {
-      createSmartMainBlock(scene, bld, bodyMap);
+      buildingGroup = createSmartMainBlock(scene, bld, bodyMap);
   } else {
-      createSmartAuditorium(scene, bld, bodyMap);
+      buildingGroup = createSmartAuditorium(scene, bld, bodyMap);
+  }
+  if (buildingGroup) {
+    groupMap.set(bld.id, buildingGroup as THREE.Group);
   }
 
   // Generate clickable room meshes inside glass

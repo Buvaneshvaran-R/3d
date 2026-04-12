@@ -48,6 +48,90 @@ const smGlassMat = new THREE.MeshStandardMaterial({
     metalness: 0.2
 });
 
+function createClassroomModule(width, height, depth, color, labelColor) {
+    const moduleGroup = new THREE.Group();
+    const roomGeometry = new THREE.BoxGeometry(width, height, depth);
+    const roomMaterial = new THREE.MeshStandardMaterial({
+        color,
+        roughness: 0.75,
+        metalness: 0.05,
+        transparent: true,
+        opacity: 0.98
+    });
+    const room = new THREE.Mesh(roomGeometry, roomMaterial);
+    room.castShadow = true;
+    room.receiveShadow = true;
+    moduleGroup.add(room);
+
+    const roof = new THREE.Mesh(
+        new THREE.BoxGeometry(width * 0.96, Math.max(0.45, height * 0.18), depth * 0.96),
+        new THREE.MeshStandardMaterial({ color: labelColor, roughness: 0.6, metalness: 0.05 })
+    );
+    roof.position.y = height / 2 + Math.max(0.3, height * 0.12);
+    moduleGroup.add(roof);
+
+    const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(roomGeometry),
+        new THREE.LineBasicMaterial({ color: labelColor, transparent: true, opacity: 0.35 })
+    );
+    moduleGroup.add(edges);
+
+    return moduleGroup;
+}
+
+function addClassroomFloorPlan(group, floorY, roomPositions, roomSize, roomHeight, floorColor, labelColor) {
+    const floorPlate = new THREE.Mesh(
+        new THREE.BoxGeometry(roomSize.width * 0.98, 0.2, roomSize.depth * 0.98),
+        new THREE.MeshStandardMaterial({ color: floorColor, transparent: true, opacity: 0.22, roughness: 0.9 })
+    );
+    floorPlate.position.set(0, floorY + 0.1, 0);
+    group.add(floorPlate);
+
+    roomPositions.forEach(({ x, z }) => {
+        const classroom = createClassroomModule(roomSize.width, roomHeight, roomSize.depth, floorColor, labelColor);
+        classroom.position.set(x, floorY + roomHeight / 2 + 0.2, z);
+        group.add(classroom);
+    });
+}
+
+function createLineLayout(count, spacing) {
+    const totalWidth = (count - 1) * spacing;
+    return Array.from({ length: count }, (_, index) => ({
+        x: -totalWidth / 2 + index * spacing,
+        z: 0
+    }));
+}
+
+function createRingLayout(spacing) {
+    return [
+        { x: -spacing, z: -spacing },
+        { x: 0, z: -spacing },
+        { x: spacing, z: -spacing },
+        { x: -spacing, z: 0 },
+        { x: spacing, z: 0 },
+        { x: -spacing, z: spacing },
+        { x: 0, z: spacing },
+        { x: spacing, z: spacing }
+    ];
+}
+
+function addTransparentShell(group, width, height, depth, color, opacity) {
+    const shellMaterial = new THREE.MeshStandardMaterial({
+        color,
+        roughness: 0.8,
+        metalness: 0.1,
+        transparent: true,
+        opacity,
+        depthWrite: false
+    });
+    const shell = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), shellMaterial);
+    shell.position.y = height / 2;
+    shell.castShadow = true;
+    shell.receiveShadow = true;
+    group.add(shell);
+    return shell;
+}
+
 export function createSmartAcademicBlock(scene: THREE.Scene | undefined, bld: any | undefined, bodyMap: any | undefined) {
   const group = new THREE.Group();
   let width = 28, height = 32, depth = 18;
@@ -59,12 +143,27 @@ export function createSmartAcademicBlock(scene: THREE.Scene | undefined, bld: an
       if(scene) scene.add(group);
   }
 
-  const shellMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8, metalness: 0.1 });
-  const shell = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), shellMat);
-  shell.position.y = height / 2;
-  shell.castShadow = true; shell.receiveShadow = true;
+    const shell = addTransparentShell(group, width, height, depth, 0xffffff, 0.18);
   group.add(shell);
   if (bld && bodyMap) bodyMap.set(bld.id, shell);
+
+    const floorCount = 4;
+    const floorHeight = height / floorCount;
+    const roomWidth = width * 0.14;
+    const roomDepth = depth * 0.38;
+    const straightLineLayout = createLineLayout(7, width * 0.16);
+
+    for (let floor = 0; floor < floorCount; floor++) {
+        addClassroomFloorPlan(
+            group,
+            floor * floorHeight,
+            straightLineLayout,
+            { width: roomWidth, depth: roomDepth },
+            floorHeight * 0.45,
+            [0xe7c8b1, 0xc8d7f0, 0xcfe8cf][floor],
+            0x1f2937
+        );
+    }
 
   const glassMat = new THREE.MeshStandardMaterial({ color: 0x3388ff, transparent: true, opacity: 0.8, roughness: 0.1, metalness: 0.5 });
   const glassFacade = new THREE.Mesh(new THREE.PlaneGeometry(width * 0.9, height * 0.8), glassMat);
@@ -102,12 +201,27 @@ export function createSmartMainBlock(scene: THREE.Scene | undefined, bld: any | 
         if(scene) scene.add(group);
     }
 
-    const shellMat = new THREE.MeshStandardMaterial({ color: 0xf0f0f0, roughness: 0.9 });
-    const shell = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), shellMat);
-    shell.position.y = height / 2;
-    shell.castShadow = true; shell.receiveShadow = true;
+    const shell = addTransparentShell(group, width, height, depth, 0xf0f0f0, 0.16);
     group.add(shell);
     if (bld && bodyMap) bodyMap.set(bld.id, shell);
+
+    const floorCount = 7;
+    const floorHeight = height / floorCount;
+    const roomWidth = width * 0.14;
+    const roomDepth = depth * 0.36;
+    const straightLineLayout = createLineLayout(7, width * 0.16);
+
+    for (let floor = 0; floor < floorCount; floor++) {
+        addClassroomFloorPlan(
+            group,
+            floor * floorHeight,
+            straightLineLayout,
+            { width: roomWidth, depth: roomDepth },
+            floorHeight * 0.45,
+            [0xd7e3f4, 0xe5d7ef, 0xd8ecd8, 0xf1e2c8, 0xd6edf2, 0xf0d9d0, 0xe2e2e2][floor],
+            0x1f2937
+        );
+    }
 
     const winMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.2, metalness: 0.8 });
     for(let r=1; r<6; r++) {
@@ -153,6 +267,24 @@ export function createSmartAuditorium(scene: THREE.Scene | undefined, bld: any |
     invisibleShell.position.y = height/2;
     group.add(invisibleShell);
     if (bld && bodyMap) bodyMap.set(bld.id, invisibleShell);
+
+    const floorCount = 4;
+    const floorHeight = height / floorCount;
+    const roomWidth = width * 0.14;
+    const roomDepth = depth * 0.22;
+    const ringLayout = createRingLayout(width * 0.18);
+
+    for (let floor = 1; floor < floorCount; floor++) {
+        addClassroomFloorPlan(
+            group,
+            floor * floorHeight,
+            ringLayout,
+            { width: roomWidth, depth: roomDepth },
+            floorHeight * 0.56,
+            [0xf1d29a, 0xe8d6f1, 0xd8ecd8][floor - 1],
+            0x1f2937
+        );
+    }
 
     const brownMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.9 });
     const leftBlock = new THREE.Mesh(new THREE.BoxGeometry(width*0.3, height, depth), brownMat);
