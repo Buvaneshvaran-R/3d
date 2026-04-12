@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,13 @@ const Login = () => {
   // Determine login mode based on route
   const isAdminLogin = location.pathname === "/admin-login";
   const isPrintKeeperLogin = location.pathname === "/print-keeper-login";
+
+  useEffect(() => {
+    // Always start with empty credentials when this screen/mode is opened.
+    setEmail("");
+    setPassword("");
+    setError("");
+  }, [location.pathname]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -99,7 +106,7 @@ const Login = () => {
             </p>
           </div>
 
-          <form onSubmit={handleLogin} className="space-y-5">
+          <form onSubmit={handleLogin} className="space-y-5" autoComplete="off">
             <div className="space-y-2">
               <Label htmlFor="email" className="text-sm font-medium">
                 {isPrintKeeperLogin ? "Keeper Email" : isAdminLogin ? "Admin Email" : "Email Address"}
@@ -107,6 +114,8 @@ const Login = () => {
               <Input
                 id="email"
                 type="email"
+                name="login-email"
+                autoComplete="off"
                 placeholder={isPrintKeeperLogin ? "print@rit.edu" : isAdminLogin ? "admin@rit.edu" : "student@rit.edu"}
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -123,6 +132,8 @@ const Login = () => {
                 <Input
                   id="password"
                   type={showPassword ? "text" : "password"}
+                  name="login-password"
+                  autoComplete="new-password"
                   placeholder="Enter your password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}

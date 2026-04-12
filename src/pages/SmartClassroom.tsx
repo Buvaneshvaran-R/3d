@@ -309,11 +309,11 @@ const SmartClassroom = () => {
   const mockDataset = useMemo(() => createMockIntelligenceDataset(currentTime), [simulationMode]);
   const classroomTour: ClassroomTourStep[] = useMemo(
     () => [
-      { label: "dummy", buildingId: null, floor: null },
+      { label: "overview", buildingId: null, floor: null },
       { label: "A", buildingId: "A", floor: 0 },
       { label: "B", buildingId: "B", floor: 0 },
       { label: "C", buildingId: "C", floor: 0 },
-      { label: "dummy", buildingId: null, floor: null },
+      { label: "overview", buildingId: null, floor: null },
     ],
     []
   );
@@ -342,7 +342,7 @@ const SmartClassroom = () => {
 
   const blockDisplayLabel = useMemo(() => {
     const current = classroomTour[classroomTourIndex];
-    if (!current?.buildingId) return "dummy";
+    if (!current?.buildingId) return "Overview";
     if (current.buildingId === "A") return "A";
     if (current.buildingId === "B") return "B";
     if (current.buildingId === "C") return "C";
