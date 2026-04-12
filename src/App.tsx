@@ -30,6 +30,7 @@ import AdminStudentManagement from "./pages/AdminStudentManagement";
 import PrintDashboard from "./pages/PrintDashboard";
 import PrintKeeperPortal from "./pages/PrintKeeperPortal";
 import SmartClassroom from "./pages/SmartClassroom";
+import ClassroomAllocation from "./pages/ClassroomAllocation";
 import Moodle from "./pages/Moodle";
 
 // Layout
@@ -80,6 +81,7 @@ const App = () => (
             <Route path="/admin/students" element={<AdminStudentManagement />} />
             <Route path="/print" element={<PrintDashboard />} />
             <Route path="/smart-classroom" element={<SmartClassroom />} />
+            <Route path="/classroom-allocation" element={<ClassroomAllocation />} />
             <Route path="/moodle" element={<Moodle />} />
           </Route>
 

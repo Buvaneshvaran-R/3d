@@ -49,6 +49,17 @@ const SignUp = () => {
     "Artificial Intelligence and Machine Learning": ["A", "B", "C"],
   };
 
+  const departmentOptions = [
+    { value: "Artificial Intelligence and Data Science", label: "AIDS" },
+    { value: "Computer Science and Engineering", label: "CSE" },
+    { value: "Electronics and Communication Engineering", label: "ECE" },
+    { value: "Mechanical Engineering", label: "MECH" },
+    { value: "Bio Technology", label: "BIO TECH" },
+    { value: "Computer and Communication Engineering", label: "CCE" },
+    { value: "VLSI Design", label: "VLSI" },
+    { value: "Artificial Intelligence and Machine Learning", label: "AIML" },
+  ];
+
   const handleSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
@@ -348,14 +359,9 @@ const SignUp = () => {
                         <SelectValue placeholder="Select department" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="Artificial Intelligence and Data Science">AIDS</SelectItem>
-                        <SelectItem value="Computer Science and Engineering">CSE</SelectItem>
-                        <SelectItem value="Electronics and Communication Engineering">ECE</SelectItem>
-                        <SelectItem value="Mechanical Engineering">MECH</SelectItem>
-                        <SelectItem value="Bio Technology">BIO TECH</SelectItem>
-                        <SelectItem value="Computer and Communication Engineering">CCE</SelectItem>
-                        <SelectItem value="VLSI Design">VLSI</SelectItem>
-                        <SelectItem value="Artificial Intelligence and Machine Learning">AIML</SelectItem>
+                        {departmentOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   </div>
@@ -422,14 +428,16 @@ const SignUp = () => {
 
                 <div className="space-y-2">
                   <Label htmlFor="adminDept" className="text-sm font-medium">Department <span className="text-destructive">*</span></Label>
-                  <Input
-                    id="adminDept"
-                    placeholder="e.g., Administration"
-                    value={department}
-                    onChange={(e) => setDepartment(e.target.value)}
-                    className="h-11"
-                    required
-                  />
+                  <Select value={department} onValueChange={setDepartment} required>
+                    <SelectTrigger id="adminDept" className="h-11">
+                      <SelectValue placeholder="Select department" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {departmentOptions.map((option) => (
+                        <SelectItem key={`admin-${option.value}`} value={option.value}>{option.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
             )}

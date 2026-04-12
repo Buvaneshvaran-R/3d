@@ -11,6 +11,12 @@ import { Input } from "@/components/ui/input";
 import { FloorVisualizer } from "@/components/FloorVisualizer";
 import { campusData } from "@/data/campusData";
 import {
+  buildMockAllocations,
+  buildMockArchive,
+  createMockIntelligenceDataset,
+  withMockConfirmation,
+} from "@/lib/classroomIntelligence";
+import {
   Dialog,
   DialogContent,
   DialogHeader,
@@ -65,6 +71,7 @@ interface ScheduleSlot {
   offsite_marked_by: string | null;
   offsite_reason: string | null;
   attendance_url: string | null;
+  session_status?: string | null;
 }
 
 interface TeacherProfile {
@@ -88,6 +95,7 @@ interface TimetableEntry {
 interface ClassroomAllocation {
   classroom_id: string;
   building_id: string;
+  floor_number: number;
   room_number: number;
   allocated_staff: string;
   subject: string;
@@ -96,6 +104,9 @@ interface ClassroomAllocation {
   time_end: string;
   is_staff_present: boolean;
   substitute_staff?: string;
+  session_status?: LiveClassroomState;
+  department?: string | null;
+  teacher_user_id?: string;
 }
 
 type LiveClassroomState =
@@ -108,6 +119,17 @@ type LiveClassroomState =
 
 type NavigatorScope = "block" | "floor" | "classroom";
 
+type ClassroomTourStep = {
+  label: string;
+  buildingId: string | null;
+  floor: number | null;
+};
+
+type FloorTourStep = {
+  label: string;
+  value: number;
+};
+
 const GRACE_MINUTES = 10;
 const OFFSITE_REASONS = [
   "Industrial Visit",
@@ -118,6 +140,85 @@ const OFFSITE_REASONS = [
   "Lab Maintenance",
   "Other",
 ];
+
+const CLASS_PERIODS = [
+  { label: "08:00-08:50", startMinutes: 8 * 60, endMinutes: 8 * 60 + 50 },
+  { label: "08:50-09:40", startMinutes: 8 * 60 + 50, endMinutes: 9 * 60 + 40 },
+  { label: "10:10-11:00", startMinutes: 10 * 60 + 10, endMinutes: 11 * 60 },
+  { label: "11:00-11:50", startMinutes: 11 * 60, endMinutes: 11 * 60 + 50 },
+  { label: "11:50-12:40", startMinutes: 11 * 60 + 50, endMinutes: 12 * 60 + 40 },
+  { label: "13:30-14:15", startMinutes: 13 * 60 + 30, endMinutes: 14 * 60 + 15 },
+  { label: "14:15-15:00", startMinutes: 14 * 60 + 15, endMinutes: 15 * 60 },
+];
+
+const resolveBookingPeriod = (reference: Date) => {
+  const nowMinutes = reference.getHours() * 60 + reference.getMinutes();
+  const period = CLASS_PERIODS.find((item) => nowMinutes >= item.startMinutes && nowMinutes < item.endMinutes);
+  if (!period) return null;
+
+  const periodStart = new Date(reference);
+  periodStart.setHours(Math.floor(period.startMinutes / 60), period.startMinutes % 60, 0, 0);
+
+  const periodEnd = new Date(reference);
+  periodEnd.setHours(Math.floor(period.endMinutes / 60), period.endMinutes % 60, 0, 0);
+
+  const slotStart = reference > periodStart ? reference : periodStart;
+  return {
+    label: period.label,
+    slotStart,
+    slotEnd: periodEnd,
+  };
+};
+
+const getActionErrorMessage = (error: unknown, fallback: string) => {
+  if (!error) return fallback;
+
+  if (error instanceof Error) {
+    return error.message || fallback;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  if (typeof error === "object") {
+    const maybe = error as {
+      message?: string;
+      details?: string;
+      hint?: string;
+      code?: string;
+      error_description?: string;
+    };
+
+    const parts = [
+      maybe.message,
+      maybe.error_description,
+      maybe.details,
+      maybe.hint,
+      maybe.code ? `code: ${maybe.code}` : undefined,
+    ].filter(Boolean);
+
+    if (parts.length > 0) {
+      return parts.join(" | ");
+    }
+  }
+
+  return fallback;
+};
+
+const isMissingScheduleTableError = (error: unknown) => {
+  if (!error) return false;
+
+  const text =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : JSON.stringify(error);
+
+  const normalized = text.toLowerCase();
+  return normalized.includes("pgrst205") || normalized.includes("classroom_schedule_slots");
+};
 
 const SmartClassroom = () => {
   const { user, isAdmin, isStudent } = useAuth();
@@ -133,6 +234,7 @@ const SmartClassroom = () => {
   const [classroomAllocations, setClassroomAllocations] = useState<ClassroomAllocation[]>([]);
   const [staffAbsences, setStaffAbsences] = useState<Map<string, boolean>>(new Map());
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
+  const [simulationMode, setSimulationMode] = useState(false);
 
   const [mode, setMode] = useState<"overview" | "navigator" | "floorDetection">("overview");
   const [navigatorScope, setNavigatorScope] = useState<NavigatorScope>("block");
@@ -146,14 +248,61 @@ const SmartClassroom = () => {
   
   // Floor Detection States
   const [floorDetectionBuilding, setFloorDetectionBuilding] = useState<string>("A");
-  const [floorDetectionFloor, setFloorDetectionFloor] = useState<number>(0);
+  const [floorDetectionFloor, setFloorDetectionFloor] = useState<number>(-1);
 
   const [showDetails, setShowDetails] = useState(false);
   const [isMarking, setIsMarking] = useState(false);
   const [isSavingScheduleAction, setIsSavingScheduleAction] = useState(false);
   const [classroomStatus, setClassroomStatus] = useState<ClassroomAttendance | null>(null);
+  const [mockScheduleOverrides, setMockScheduleOverrides] = useState<Record<string, ScheduleSlot>>({});
+  const [classroomTourIndex, setClassroomTourIndex] = useState(0);
+  const [floorTourIndex, setFloorTourIndex] = useState(0);
+  const [isScheduleTableAvailable, setIsScheduleTableAvailable] = useState(true);
+  const [allocationTimeFilter, setAllocationTimeFilter] = useState<string>("all");
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const mockDataset = useMemo(() => createMockIntelligenceDataset(currentTime), [simulationMode]);
+  const classroomTour: ClassroomTourStep[] = useMemo(
+    () => [
+      { label: "dummy", buildingId: null, floor: null },
+      { label: "A", buildingId: "A", floor: 0 },
+      { label: "B", buildingId: "B", floor: 0 },
+      { label: "C", buildingId: "C", floor: 0 },
+      { label: "dummy", buildingId: null, floor: null },
+    ],
+    []
+  );
+
+  const buildingFloorCounts: Record<string, number> = {
+    A: 4,
+    B: 4,
+    C: 8,
+  };
+
+  const floorTourSteps: FloorTourStep[] = useMemo(() => {
+    if (floorDetectionBuilding === "dummy") {
+      return [{ label: "full block", value: -1 }];
+    }
+
+    const maxFloors = buildingFloorCounts[floorDetectionBuilding] || 1;
+    const sequence: FloorTourStep[] = [{ label: "full block", value: -1 }, { label: "ground", value: 0 }];
+
+    for (let floor = 1; floor < maxFloors; floor += 1) {
+      sequence.push({ label: String(floor), value: floor });
+    }
+
+    sequence.push({ label: "full block", value: -1 });
+    return sequence;
+  }, [floorDetectionBuilding]);
+
+  const blockDisplayLabel = useMemo(() => {
+    const current = classroomTour[classroomTourIndex];
+    if (!current?.buildingId) return "dummy";
+    if (current.buildingId === "A") return "A";
+    if (current.buildingId === "B") return "B";
+    if (current.buildingId === "C") return "C";
+    return current.label;
+  }, [classroomTour, classroomTourIndex]);
 
   const statusColorClass: Record<LiveClassroomState, string> = {
     FREE: "bg-green-500",
@@ -200,44 +349,54 @@ const SmartClassroom = () => {
     return teachers.find((teacher) => teacher.user_id === teacherUserId) || null;
   };
 
+  const normalizeSchedule = (schedule: ScheduleSlot): ScheduleSlot => {
+    const override = mockScheduleOverrides[schedule.id];
+    return override ? { ...schedule, ...override } : schedule;
+  };
+
   // Calculate classroom allocations based on timetable and current time
   const calculateAllocations = () => {
-    const now = new Date();
+    const now = currentTime;
     const allocations: ClassroomAllocation[] = [];
 
     schedules.forEach((schedule) => {
-      const slotStart = new Date(schedule.slot_start);
-      const slotEnd = new Date(schedule.slot_end);
+      const slot = normalizeSchedule(schedule);
+      const slotStart = new Date(slot.slot_start);
+      const slotEnd = new Date(slot.slot_end);
 
       // Check if current time falls within this slot
       if (now >= slotStart && now <= slotEnd) {
-        const classroom = classrooms.find((c) => c.id === schedule.classroom_id);
-        const teacher = getTeacher(schedule.teacher_user_id);
+        const classroom = classrooms.find((c) => c.id === slot.classroom_id);
+        const teacher = getTeacher(slot.teacher_user_id);
 
         if (classroom && teacher) {
           // Check if staff marked present
-          const isPresent = schedule.confirmed_at != null;
+          const isPresent = slot.confirmed_at != null || slot.session_status === "OCCUPIED";
           let substituteStaff: string | undefined;
 
           // If staff is absent, find available substitute
           if (!isPresent) {
             const availableStaff = teachers.find((t) =>
-              t.user_id !== schedule.teacher_user_id && t.department === teacher.department
+              t.user_id !== slot.teacher_user_id && t.department === teacher.department
             );
             substituteStaff = availableStaff?.name;
           }
 
           allocations.push({
-            classroom_id: schedule.classroom_id,
-            building_id: classroom.block_id,
+            classroom_id: slot.classroom_id,
+            building_id: getBlockCode(classroom.block_id),
+            floor_number: classroom.floor_number,
             room_number: classroom.classroom_number,
             allocated_staff: teacher.name,
-            subject: schedule.subject || "N/A",
-            batch: schedule.section || "N/A",
+            subject: slot.subject || "N/A",
+            batch: slot.section || "N/A",
             time_start: slotStart.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
             time_end: slotEnd.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
             is_staff_present: isPresent,
             substitute_staff: substituteStaff,
+            session_status: (slot.session_status as LiveClassroomState) || (isPresent ? "OCCUPIED" : "SCHEDULED"),
+            department: slot.department || teacher.department,
+            teacher_user_id: slot.teacher_user_id,
           });
         }
       }
@@ -264,16 +423,17 @@ const SmartClassroom = () => {
 
   // Check staff presence from schedule
   const checkStaffPresence = () => {
-    const now = new Date();
+    const now = currentTime;
     const absences = new Map<string, boolean>();
 
     schedules.forEach((schedule) => {
-      const slotStart = new Date(schedule.slot_start);
-      const slotEnd = new Date(schedule.slot_end);
+      const slot = normalizeSchedule(schedule);
+      const slotStart = new Date(slot.slot_start);
+      const slotEnd = new Date(slot.slot_end);
 
       if (now >= slotStart && now <= slotEnd) {
-        const isPresent = schedule.confirmed_at != null;
-        absences.set(schedule.teacher_user_id, !isPresent);
+        const isPresent = slot.confirmed_at != null || slot.session_status === "OCCUPIED";
+        absences.set(slot.teacher_user_id, !isPresent);
       }
     });
 
@@ -281,6 +441,15 @@ const SmartClassroom = () => {
   };
 
   const refreshData = async () => {
+    if (simulationMode) {
+      setBlocks(mockDataset.blocks as Block[]);
+      setFloors(mockDataset.floors as Floor[]);
+      setClassrooms(mockDataset.classrooms as Classroom[]);
+      setTeachers(mockDataset.teachers as TeacherProfile[]);
+      setSchedules(mockDataset.schedules as ScheduleSlot[]);
+      return;
+    }
+
     const [blocksRes, floorsRes, classroomsRes, teachersRes] = await Promise.all([
       supabase.from("blocks").select("*"),
       supabase.from("floors").select("*"),
@@ -305,9 +474,11 @@ const SmartClassroom = () => {
       .order("slot_start", { ascending: true });
 
     if (!scheduleRes.error) {
+      setIsScheduleTableAvailable(true);
       setSchedules((scheduleRes.data || []) as ScheduleSlot[]);
     } else {
       // Fallback for environments where the advanced tables are not migrated yet.
+      setIsScheduleTableAvailable(false);
       setSchedules([]);
     }
   };
@@ -358,7 +529,18 @@ const SmartClassroom = () => {
   }, []);
 
   useEffect(() => {
+    refreshData().catch((error) => {
+      console.error("Failed to refresh classroom data for current mode:", error);
+    });
+  }, [simulationMode, mockDataset]);
+
+  useEffect(() => {
     if (!selectedClassroom) {
+      setClassroomStatus(null);
+      return;
+    }
+
+    if (simulationMode) {
       setClassroomStatus(null);
       return;
     }
@@ -375,7 +557,7 @@ const SmartClassroom = () => {
     };
 
     fetchActiveAttendance();
-  }, [selectedClassroom]);
+  }, [selectedClassroom, simulationMode]);
 
   // Update allocations when schedules or time changes
   useEffect(() => {
@@ -385,12 +567,19 @@ const SmartClassroom = () => {
 
   // Update current time every minute
   useEffect(() => {
-    const timeInterval = setInterval(() => {
+    const tick = () => {
+      if (simulationMode) {
+        setCurrentTime((prev) => new Date(prev.getTime() + 60 * 1000));
+        return;
+      }
+
       setCurrentTime(new Date());
-    }, 60000);
+    };
+
+    const timeInterval = setInterval(tick, simulationMode ? 1000 : 60000);
 
     return () => clearInterval(timeInterval);
-  }, []);
+  }, [simulationMode]);
 
   useEffect(() => {
     setSelectedFloor("all");
@@ -546,7 +735,7 @@ const SmartClassroom = () => {
   };
 
   const liveModel = useMemo(() => {
-    const nowMs = Date.now();
+    const nowMs = currentTime.getTime();
     const scheduleByClassroom = new Map<string, ScheduleSlot[]>();
 
     schedules.forEach((slot) => {
@@ -580,12 +769,12 @@ const SmartClassroom = () => {
       if (activeSlot) {
         activeSlotMap.set(room.id, activeSlot);
 
-        if (activeSlot.offsite_marked_at) {
+        if (activeSlot.offsite_marked_at || activeSlot.session_status === "OFFSITE") {
           classroomStateMap.set(room.id, "OFFSITE");
           return;
         }
 
-        if (activeSlot.confirmed_at) {
+        if (activeSlot.confirmed_at || activeSlot.session_status === "OCCUPIED") {
           classroomStateMap.set(room.id, "OCCUPIED");
           return;
         }
@@ -603,7 +792,7 @@ const SmartClassroom = () => {
         .filter((slot) => new Date(slot.slot_end).getTime() <= nowMs)
         .sort((a, b) => new Date(b.slot_end).getTime() - new Date(a.slot_end).getTime())[0];
 
-      if (latestEndedSlot && nowMs - new Date(latestEndedSlot.slot_end).getTime() < 60 * 60 * 1000) {
+      if (latestEndedSlot && nowMs - new Date(latestEndedSlot.slot_end).getTime() < 60 * 1000) {
         classroomStateMap.set(room.id, "SESSION_COMPLETED");
         activeSlotMap.set(room.id, latestEndedSlot);
       } else {
@@ -666,9 +855,61 @@ const SmartClassroom = () => {
       });
   }, [searchTeacher, teachers, schedules, classrooms, blocks]);
 
+  const navigatorTeacherResults = useMemo(() => {
+    const query = navigatorTeacherQuery.trim().toLowerCase();
+    if (!query) return [];
+
+    return classroomAllocations
+      .filter((row) => row.allocated_staff.toLowerCase().includes(query))
+      .slice(0, 6);
+  }, [navigatorTeacherQuery, classroomAllocations]);
+
+  const teacherNameSuggestions = useMemo(() => {
+    const names = [...new Set(teachers.map((teacher) => teacher.name).filter(Boolean))].sort((a, b) =>
+      a.localeCompare(b)
+    );
+    const query = navigatorTeacherQuery.trim().toLowerCase();
+    if (!query) return [];
+    return names.filter((name) => name.toLowerCase().includes(query)).slice(0, 8);
+  }, [teachers, navigatorTeacherQuery]);
+
+  const focusTeacherInNavigator = (allocation: ClassroomAllocation) => {
+    setNavigatorTeacherQuery(allocation.allocated_staff);
+
+    const targetTourIndex = classroomTour.findIndex(
+      (step) => step.buildingId === allocation.building_id
+    );
+    if (targetTourIndex >= 0) {
+      setClassroomTourIndex(targetTourIndex);
+    }
+  };
+
+  const allocationTimeOptions = useMemo(() => {
+    const options = new Set<string>();
+    classroomAllocations.forEach((allocation) => {
+      options.add(`${allocation.time_start} - ${allocation.time_end}`);
+    });
+    return Array.from(options).sort();
+  }, [classroomAllocations]);
+
+  const visibleAllocations = useMemo(() => {
+    if (allocationTimeFilter === "all") return classroomAllocations;
+    return classroomAllocations.filter(
+      (allocation) => `${allocation.time_start} - ${allocation.time_end}` === allocationTimeFilter
+    );
+  }, [classroomAllocations, allocationTimeFilter]);
+
   const canConfirmPresence =
     !!selectedSchedule && !!user && (selectedSchedule.teacher_user_id === user.id || isAdmin());
   const canMarkOffsite = !!user && isAdmin();
+
+  const sessionArchive = useMemo(() => {
+    return buildMockArchive(
+      schedules.map(normalizeSchedule),
+      teachers,
+      currentTime
+    );
+  }, [schedules, teachers, currentTime, mockScheduleOverrides]);
 
   const runSessionArchive = async (slot: ScheduleSlot, status: string) => {
     try {
@@ -701,7 +942,32 @@ const SmartClassroom = () => {
 
     setIsSavingScheduleAction(true);
     try {
+      if (simulationMode) {
+        const nowIso = new Date().toISOString();
+        setSchedules((prev) =>
+          withMockConfirmation(prev, selectedSchedule.classroom_id, new Date(nowIso))
+        );
+        setMockScheduleOverrides((prev) => ({
+          ...prev,
+          [selectedSchedule.id]: {
+            ...selectedSchedule,
+            confirmed_at: nowIso,
+            confirmed_by: user.id,
+            session_status: "OCCUPIED",
+          },
+        }));
+
+        toast({
+          title: "Presence Confirmed",
+          description: "Mock classroom status updated to OCCUPIED.",
+        });
+
+        setIsSavingScheduleAction(false);
+        return;
+      }
+
       const nowIso = new Date().toISOString();
+
       const { error: scheduleError } = await supabase
         .from("classroom_schedule_slots")
         .update({
@@ -711,7 +977,25 @@ const SmartClassroom = () => {
         })
         .eq("id", selectedSchedule.id);
 
-      if (scheduleError) throw scheduleError;
+      if (scheduleError) {
+        if (isMissingScheduleTableError(scheduleError)) {
+          setIsScheduleTableAvailable(false);
+          setSchedules((prev) =>
+            prev.map((slot) =>
+              slot.id === selectedSchedule.id
+                ? {
+                    ...slot,
+                    confirmed_at: nowIso,
+                    confirmed_by: user.id,
+                    session_status: "OCCUPIED",
+                  }
+                : slot
+            )
+          );
+        } else {
+          throw scheduleError;
+        }
+      }
 
       await supabase
         .from("classrooms")
@@ -748,6 +1032,28 @@ const SmartClassroom = () => {
 
     setIsSavingScheduleAction(true);
     try {
+      if (simulationMode) {
+        const nowIso = new Date().toISOString();
+        setMockScheduleOverrides((prev) => ({
+          ...prev,
+          [selectedSchedule.id]: {
+            ...selectedSchedule,
+            offsite_marked_at: nowIso,
+            offsite_marked_by: user.id,
+            offsite_reason: offsiteReason,
+            session_status: "OFFSITE",
+          },
+        }));
+
+        toast({
+          title: "Offsite Updated",
+          description: "Mock session marked as OFFSITE and classroom released.",
+        });
+
+        setIsSavingScheduleAction(false);
+        return;
+      }
+
       const nowIso = new Date().toISOString();
       const { error: scheduleError } = await supabase
         .from("classroom_schedule_slots")
@@ -790,14 +1096,111 @@ const SmartClassroom = () => {
     if (!user) return;
     setIsSavingScheduleAction(true);
     try {
-      const nowIso = new Date().toISOString();
-      const slotEnd = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      const referenceNow = simulationMode ? new Date(currentTime) : new Date();
+      const bookingPeriod = resolveBookingPeriod(referenceNow);
+      if (!bookingPeriod) {
+        toast({
+          title: "Booking unavailable",
+          description: "Bookings are allowed only during class periods (not during break/lunch or outside timetable).",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const nowIso = bookingPeriod.slotStart.toISOString();
+      const slotEnd = bookingPeriod.slotEnd.toISOString();
+
+      if (simulationMode) {
+        const mockSlot: ScheduleSlot = {
+          id: `mock-${classroom.id}-${Date.now()}`,
+          classroom_id: classroom.id,
+          teacher_user_id: user.id,
+          subject: "Pickup Class",
+          department: user.department || null,
+          section: "Ad-hoc",
+          slot_start: nowIso,
+          slot_end: slotEnd,
+          session_status: "OCCUPIED",
+          confirmed_at: nowIso,
+          confirmed_by: user.id,
+          offsite_marked_at: null,
+          offsite_marked_by: null,
+          offsite_reason: null,
+          attendance_url: null,
+        };
+
+        setSchedules((prev) => [...prev, mockSlot]);
+        toast({
+          title: "Classroom Booked",
+          description: `${getClassroomCode(classroom)} booked for period ${bookingPeriod.label} in simulation mode.`,
+        });
+        setIsSavingScheduleAction(false);
+        return;
+      }
+
+      const applyLegacyBookingFallback = async () => {
+        const legacySlot: ScheduleSlot = {
+          id: `legacy-${classroom.id}-${Date.now()}`,
+          classroom_id: classroom.id,
+          teacher_user_id: user.id,
+          subject: "Pickup Class",
+          department: user.department || null,
+          section: "Ad-hoc",
+          slot_start: nowIso,
+          slot_end: slotEnd,
+          session_status: "OCCUPIED",
+          confirmed_at: nowIso,
+          confirmed_by: user.id,
+          offsite_marked_at: null,
+          offsite_marked_by: null,
+          offsite_reason: null,
+          attendance_url: null,
+        };
+
+        setSchedules((prev) => [...prev, legacySlot]);
+        setClassrooms((prev) =>
+          prev.map((item) => (item.id === classroom.id ? { ...item, status: "occupied" } : item))
+        );
+
+        const { error: classroomUpdateError } = await supabase
+          .from("classrooms")
+          .update({ status: "occupied", updated_at: nowIso })
+          .eq("id", classroom.id);
+
+        if (classroomUpdateError) {
+          console.warn("Legacy booking classroom update skipped:", classroomUpdateError);
+        }
+
+        const { error: attendanceError } = await supabase.from("classroom_attendance").insert({
+          classroom_id: classroom.id,
+          teacher_id: user.id,
+          marked_in_at: nowIso,
+          status: "occupied",
+        });
+
+        if (attendanceError) {
+          console.warn("Legacy booking attendance insert skipped:", attendanceError);
+        }
+
+        toast({
+          title: "Classroom Booked",
+          description: `${getClassroomCode(classroom)} booked for period ${bookingPeriod.label} (legacy mode).`,
+        });
+      };
+
+      if (!isScheduleTableAvailable) {
+        await applyLegacyBookingFallback();
+        return;
+      }
 
       const { error: slotError } = await supabase
         .from("classroom_schedule_slots")
         .insert({
           classroom_id: classroom.id,
           teacher_user_id: user.id,
+          subject: "Pickup Class",
+          department: user.department || null,
+          section: "Ad-hoc",
           slot_start: nowIso,
           slot_end: slotEnd,
           session_status: "OCCUPIED",
@@ -805,23 +1208,48 @@ const SmartClassroom = () => {
           confirmed_by: user.id,
         });
 
-      if (slotError) throw slotError;
+      if (slotError) {
+        if (isMissingScheduleTableError(slotError)) {
+          setIsScheduleTableAvailable(false);
+          await applyLegacyBookingFallback();
+          return;
+        }
 
-      await supabase
+        throw new Error(
+          [
+            slotError.message,
+            slotError.details,
+            slotError.hint,
+            slotError.code ? `code: ${slotError.code}` : undefined,
+          ]
+            .filter(Boolean)
+            .join(" | ")
+        );
+      }
+
+      const { error: classroomUpdateError } = await supabase
         .from("classrooms")
         .update({ status: "occupied" })
         .eq("id", classroom.id);
 
-      await supabase.from("classroom_attendance").insert({
+      if (classroomUpdateError) {
+        console.warn("Classroom status update skipped:", classroomUpdateError);
+      }
+
+      const { error: attendanceError } = await supabase.from("classroom_attendance").insert({
         classroom_id: classroom.id,
         teacher_id: user.id,
         marked_in_at: nowIso,
         status: "occupied",
       });
 
+      if (attendanceError) {
+        console.warn("Attendance insert skipped:", attendanceError);
+      }
+
       toast({
         title: "Classroom Booked",
-        description: `${getClassroomCode(classroom)} booked for 1 hour.`,
+        description: `${getClassroomCode(classroom)} booked for period ${bookingPeriod.label}.`,
       });
 
       await refreshData();
@@ -829,7 +1257,343 @@ const SmartClassroom = () => {
       console.error("Failed to book classroom:", error);
       toast({
         title: "Booking Failed",
-        description: "Unable to book the classroom. Please try again.",
+        description: getActionErrorMessage(error, "Unable to book the classroom. Please try again."),
+        variant: "destructive",
+      });
+    } finally {
+      setIsSavingScheduleAction(false);
+    }
+  };
+
+  const releaseBookedSlot = async (
+    targetClassroom: Classroom,
+    targetSlot: ScheduleSlot,
+    reason: "auto" | "manual"
+  ) => {
+    const nowIso = new Date().toISOString();
+
+    if (simulationMode || !isScheduleTableAvailable) {
+      setSchedules((prev) =>
+        prev.map((slot) =>
+          slot.id === targetSlot.id
+            ? {
+                ...slot,
+                session_status: "SESSION_COMPLETED",
+                offsite_marked_at: nowIso,
+              }
+            : slot
+        )
+      );
+
+      setClassrooms((prev) =>
+        prev.map((item) => (item.id === targetClassroom.id ? { ...item, status: "available" } : item))
+      );
+
+      await supabase
+        .from("classrooms")
+        .update({ status: "available", updated_at: nowIso })
+        .eq("id", targetClassroom.id);
+
+      await supabase
+        .from("classroom_attendance")
+        .update({ marked_out_at: nowIso, status: "available" })
+        .eq("classroom_id", targetClassroom.id)
+        .is("marked_out_at", null);
+
+      return;
+    }
+
+    const { error: scheduleError } = await supabase
+      .from("classroom_schedule_slots")
+      .update({
+        session_status: "SESSION_COMPLETED",
+        offsite_marked_at: nowIso,
+        offsite_reason: reason === "manual" ? "Unbooked by admin" : "Auto-release at period end",
+      })
+      .eq("id", targetSlot.id);
+
+    if (scheduleError) {
+      if (isMissingScheduleTableError(scheduleError)) {
+        setIsScheduleTableAvailable(false);
+        await releaseBookedSlot(targetClassroom, targetSlot, reason);
+        return;
+      }
+
+      throw new Error(
+        [
+          scheduleError.message,
+          scheduleError.details,
+          scheduleError.hint,
+          scheduleError.code ? `code: ${scheduleError.code}` : undefined,
+        ]
+          .filter(Boolean)
+          .join(" | ")
+      );
+    }
+
+    await supabase
+      .from("classrooms")
+      .update({ status: "available", updated_at: nowIso })
+      .eq("id", targetClassroom.id);
+
+    await supabase
+      .from("classroom_attendance")
+      .update({ marked_out_at: nowIso, status: "available" })
+      .eq("classroom_id", targetClassroom.id)
+      .is("marked_out_at", null);
+  };
+
+  useEffect(() => {
+    if (!isAdmin()) return;
+
+    const nowMs = currentTime.getTime();
+    const expiredBookedSlots = schedules
+      .map(normalizeSchedule)
+      .filter((slot) => slot.session_status === "OCCUPIED")
+      .filter((slot) => new Date(slot.slot_end).getTime() <= nowMs)
+      .filter((slot) => slot.subject === "Pickup Class" || slot.section === "Ad-hoc");
+
+    if (expiredBookedSlots.length === 0) return;
+
+    const releaseExpired = async () => {
+      for (const slot of expiredBookedSlots) {
+        const classroom = classrooms.find((item) => item.id === slot.classroom_id);
+        if (!classroom) continue;
+
+        try {
+          await releaseBookedSlot(classroom, slot, "auto");
+        } catch (error) {
+          console.error("Failed to auto-release booked classroom:", error);
+        }
+      }
+
+      if (!simulationMode && isScheduleTableAvailable) {
+        await refreshData();
+      }
+    };
+
+    releaseExpired();
+  }, [currentTime, schedules, classrooms, simulationMode, isScheduleTableAvailable]);
+
+  const handleFloorVisualizerAdminAction = async (payload: {
+    action: "book" | "takeover" | "unbook";
+    buildingId: string;
+    floorNumber: number;
+    roomNumber: number;
+    allocation?: ClassroomAllocation;
+  }) => {
+    if (!user || !isAdmin()) return;
+
+    const resolveClassroomFromPayload = () => {
+      const allocationClassroom =
+        payload.allocation?.classroom_id
+          ? classrooms.find((classroom) => classroom.id === payload.allocation?.classroom_id)
+          : null;
+
+      if (allocationClassroom) return allocationClassroom;
+
+      const expectedCompositeRoom = payload.floorNumber * 100 + payload.roomNumber;
+      const expectedBlockCode = payload.buildingId.toUpperCase();
+
+      return (
+        classrooms.find((classroom) => {
+          const blockCode = getBlockCode(classroom.block_id).toUpperCase();
+          if (blockCode !== expectedBlockCode) return false;
+
+          const directRoomMatch = classroom.classroom_number === payload.roomNumber;
+          const compositeRoomMatch = classroom.classroom_number === expectedCompositeRoom;
+          if (!directRoomMatch && !compositeRoomMatch) return false;
+
+          const directFloorMatch = classroom.floor_number === payload.floorNumber;
+          const inferredFloor = Math.floor(classroom.classroom_number / 100);
+          const inferredFloorMatch = classroom.classroom_number >= 100 && inferredFloor === payload.floorNumber;
+
+          return directFloorMatch || inferredFloorMatch;
+        }) || null
+      );
+    };
+
+    const targetClassroom = resolveClassroomFromPayload();
+
+    if (!targetClassroom) {
+      toast({
+        title: "Classroom not found",
+        description: `Unable to resolve ${payload.buildingId}-${payload.floorNumber}${String(payload.roomNumber).padStart(2, "0")}.`,
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (payload.action === "book") {
+      await handleAdminBookClassroom(targetClassroom);
+      return;
+    }
+
+    const nowMs = currentTime.getTime();
+    const normalizedSlots = schedules.map(normalizeSchedule);
+    let targetSlot = normalizedSlots.find((slot) => {
+      if (slot.classroom_id !== targetClassroom.id) return false;
+      if (slot.offsite_marked_at || slot.session_status === "OFFSITE") return false;
+      const startMs = new Date(slot.slot_start).getTime();
+      const endMs = new Date(slot.slot_end).getTime();
+      return nowMs >= startMs && nowMs < endMs;
+    });
+
+    // Fallback: allow takeover on the nearest scheduled slot for this classroom.
+    if (!targetSlot) {
+      targetSlot = normalizedSlots
+        .filter((slot) => slot.classroom_id === targetClassroom.id)
+        .filter((slot) => !slot.offsite_marked_at && slot.session_status !== "OFFSITE")
+        .sort((a, b) => Math.abs(new Date(a.slot_start).getTime() - nowMs) - Math.abs(new Date(b.slot_start).getTime() - nowMs))[0];
+    }
+
+    if (!targetSlot) {
+      toast({
+        title: "No active allocation",
+        description: "This classroom does not have an active session to take over.",
+      });
+      return;
+    }
+
+    if (payload.action === "unbook") {
+      setIsSavingScheduleAction(true);
+      try {
+        await releaseBookedSlot(targetClassroom, targetSlot, "manual");
+
+        toast({
+          title: "Classroom Unbooked",
+          description: `${getClassroomCode(targetClassroom)} is now available.`,
+        });
+
+        if (!simulationMode && isScheduleTableAvailable) {
+          await refreshData();
+        }
+      } catch (error) {
+        console.error("Failed to unbook classroom:", error);
+        toast({
+          title: "Unbook Failed",
+          description: getActionErrorMessage(error, "Unable to unbook this classroom."),
+          variant: "destructive",
+        });
+      } finally {
+        setIsSavingScheduleAction(false);
+      }
+      return;
+    }
+
+    if (targetSlot.confirmed_at || targetSlot.session_status === "OCCUPIED") {
+      toast({
+        title: "Already occupied",
+        description: "This classroom session is already marked as occupied.",
+      });
+      return;
+    }
+
+    setIsSavingScheduleAction(true);
+    try {
+      if (simulationMode) {
+        const nowIso = new Date().toISOString();
+        setSchedules((prev) => withMockConfirmation(prev, targetSlot.classroom_id, new Date(nowIso)));
+        setMockScheduleOverrides((prev) => ({
+          ...prev,
+          [targetSlot.id]: {
+            ...targetSlot,
+            confirmed_at: nowIso,
+            confirmed_by: user.id,
+            session_status: "OCCUPIED",
+          },
+        }));
+
+        toast({
+          title: "Presence Marked",
+          description: `${getClassroomCode(targetClassroom)} marked as occupied by takeover.`,
+        });
+
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      const applyLegacyTakeoverFallback = async () => {
+        setSchedules((prev) =>
+          prev.map((slot) =>
+            slot.id === targetSlot.id
+              ? {
+                  ...slot,
+                  confirmed_at: nowIso,
+                  confirmed_by: user.id,
+                  session_status: "OCCUPIED",
+                }
+              : slot
+          )
+        );
+
+        setClassrooms((prev) =>
+          prev.map((item) => (item.id === targetClassroom.id ? { ...item, status: "occupied" } : item))
+        );
+
+        await supabase
+          .from("classrooms")
+          .update({ status: "occupied", updated_at: nowIso })
+          .eq("id", targetClassroom.id);
+
+        await supabase.from("classroom_attendance").insert({
+          classroom_id: targetClassroom.id,
+          teacher_id: user.id,
+          marked_in_at: nowIso,
+          status: "occupied",
+        });
+      };
+      const { error: scheduleError } = await supabase
+        .from("classroom_schedule_slots")
+        .update({
+          confirmed_at: nowIso,
+          confirmed_by: user.id,
+          session_status: "OCCUPIED",
+        })
+        .eq("id", targetSlot.id);
+
+      if (scheduleError) {
+        if (isMissingScheduleTableError(scheduleError)) {
+          setIsScheduleTableAvailable(false);
+          await applyLegacyTakeoverFallback();
+          return;
+        }
+
+        throw new Error(
+          [
+            scheduleError.message,
+            scheduleError.details,
+            scheduleError.hint,
+            scheduleError.code ? `code: ${scheduleError.code}` : undefined,
+          ]
+            .filter(Boolean)
+            .join(" | ")
+        );
+      }
+
+      await supabase
+        .from("classrooms")
+        .update({ status: "occupied", updated_at: nowIso })
+        .eq("id", targetSlot.classroom_id);
+
+      await supabase.from("classroom_attendance").insert({
+        classroom_id: targetSlot.classroom_id,
+        teacher_id: user.id,
+        marked_in_at: nowIso,
+        status: "occupied",
+      });
+
+      toast({
+        title: "Presence Marked",
+        description: `${getClassroomCode(targetClassroom)} takeover marked successfully.`,
+      });
+
+      await refreshData();
+    } catch (error) {
+      console.error("Failed to mark takeover presence:", error);
+      toast({
+        title: "Update Failed",
+        description: getActionErrorMessage(error, "Unable to mark takeover presence for this classroom."),
         variant: "destructive",
       });
     } finally {
@@ -847,6 +1611,29 @@ const SmartClassroom = () => {
 
     setIsMarking(true);
     try {
+      if (simulationMode) {
+        setClassroomStatus((prev) =>
+          prev
+            ? { ...prev, marked_out_at: prev.marked_out_at ? null : new Date().toISOString() }
+            : {
+                id: `mock-attendance-${selectedClassroom.id}`,
+                classroom_id: selectedClassroom.id,
+                teacher_id: user.id,
+                marked_in_at: new Date().toISOString(),
+                marked_out_at: null,
+                status: "occupied",
+              }
+        );
+
+        toast({
+          title: "Simulation Updated",
+          description: "Local attendance state updated for the classroom demo.",
+        });
+
+        setIsMarking(false);
+        return;
+      }
+
       const { data: existing } = await supabase
         .from("classroom_attendance")
         .select("*")
@@ -1384,22 +2171,187 @@ const SmartClassroom = () => {
     };
   }, []);
 
+  useEffect(() => {
+    const step = classroomTour[classroomTourIndex];
+    if (!step.buildingId) {
+      setFloorDetectionBuilding("dummy");
+      return;
+    }
+
+    setFloorDetectionBuilding(step.buildingId);
+  }, [classroomTour, classroomTourIndex]);
+
+  useEffect(() => {
+    setFloorTourIndex(0);
+  }, [floorDetectionBuilding]);
+
+  useEffect(() => {
+    const safeIndex = Math.max(0, Math.min(floorTourIndex, floorTourSteps.length - 1));
+    setFloorDetectionFloor(floorTourSteps[safeIndex]?.value ?? -1);
+  }, [floorTourIndex, floorTourSteps]);
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-2">
         <Building2 className="h-6 w-6" />
         <h1 className="text-3xl font-bold">3D Campus Navigator</h1>
+        <div className="ml-auto flex items-center gap-2">
+          <Badge className={simulationMode ? "bg-violet-600" : "bg-slate-500"}>
+            {simulationMode ? "Simulation Mode" : "Live Mode"}
+          </Badge>
+          <Button
+            variant="outline"
+            onClick={() => setSimulationMode((prev) => !prev)}
+          >
+            {simulationMode ? "Switch to Live" : "Enable Simulation"}
+          </Button>
+        </div>
       </div>
+
+      <Card className="p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm text-muted-foreground">Current Clock</p>
+            <p className="text-lg font-semibold">{currentTime.toLocaleString()}</p>
+          </div>
+          <div className="text-sm text-muted-foreground max-w-3xl">
+            {simulationMode
+              ? "Simulation is running at 1 minute per second. Classroom states advance automatically from the mock timetable."
+              : "Live mode uses the current system clock and syncs classroom status from the server when available."}
+          </div>
+        </div>
+      </Card>
+
+      <Card className="p-4">
+        <div className="space-y-3">
+          <div className="flex items-center gap-2">
+            <Search className="h-4 w-4" />
+            <p className="text-sm font-semibold">Teacher Locator</p>
+          </div>
+
+          <Input
+            placeholder="Search teacher by name"
+            value={navigatorTeacherQuery}
+            onChange={(e) => setNavigatorTeacherQuery(e.target.value)}
+          />
+
+          {navigatorTeacherQuery.trim().length > 0 && teacherNameSuggestions.length > 0 && (
+            <div className="max-h-52 overflow-y-auto rounded-md border bg-background p-1">
+              {teacherNameSuggestions.map((name) => (
+                <button
+                  type="button"
+                  key={name}
+                  className="block w-full rounded px-2 py-1 text-left text-sm hover:bg-muted"
+                  onClick={() => setNavigatorTeacherQuery(name)}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {navigatorTeacherQuery.trim().length > 0 && (
+            <div className="space-y-2">
+              {navigatorTeacherResults.length === 0 && (
+                <p className="text-sm text-muted-foreground">No teacher matched the current query.</p>
+              )}
+
+              {navigatorTeacherResults.map((row) => (
+                <button
+                  type="button"
+                  key={`${row.classroom_id}-${row.teacher_user_id || row.allocated_staff}`}
+                  className="w-full rounded-md border px-3 py-2 text-left hover:bg-muted/50"
+                  onClick={() => focusTeacherInNavigator(row)}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-medium">{row.allocated_staff}</p>
+                    <Badge className="bg-blue-500">Block {row.building_id} / Room {row.room_number}</Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{row.subject} • {row.time_start} - {row.time_end}</p>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </Card>
 
       <Card className="p-6">
         <div className="space-y-4">
           {/* 3D Floor Visualizer - Campus View */}
-          <div className="rounded-lg border border-gray-300 bg-white dark:border-gray-600 dark:bg-gray-900" style={{ height: "700px" }}>
+          <div className="relative rounded-lg border border-gray-300 bg-white dark:border-gray-600 dark:bg-gray-900" style={{ height: "700px" }}>
+            {floorDetectionBuilding !== "dummy" && (
+              <div className="absolute left-3 top-1/2 z-20 -translate-y-1/2 rounded-md border border-slate-300/60 bg-slate-100/55 px-1 py-1.5 shadow-sm backdrop-blur-sm dark:border-slate-600/70 dark:bg-slate-900/45">
+                <div className="flex min-w-[70px] flex-col items-center gap-1">
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={() => setFloorTourIndex((current) => (current + 1) % floorTourSteps.length)}
+                    aria-label="Go one floor up"
+                    disabled={floorTourSteps.length <= 1}
+                  >
+                    <ChevronUp className="h-3.5 w-3.5" />
+                  </Button>
+
+                  <div className="text-center">
+                    <p className="text-xs font-medium text-muted-foreground">FL NO</p>
+                    <p className="text-base font-semibold uppercase">
+                      {floorTourSteps[Math.max(0, Math.min(floorTourIndex, floorTourSteps.length - 1))]?.label || "full"}
+                    </p>
+                  </div>
+
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={() => setFloorTourIndex((current) => (current - 1 + floorTourSteps.length) % floorTourSteps.length)}
+                    aria-label="Go one floor down"
+                    disabled={floorTourSteps.length <= 1}
+                  >
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            <div className="absolute bottom-3 left-[calc((100%-436px)/2)] z-20 -translate-x-1/2 rounded-md border border-slate-300/60 bg-slate-100/55 px-2 py-1.5 shadow-sm backdrop-blur-sm dark:border-slate-600/70 dark:bg-slate-900/45">
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-7 w-7"
+                  onClick={() => setClassroomTourIndex((current) => (current - 1 + classroomTour.length) % classroomTour.length)}
+                  aria-label="Previous classroom building"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </Button>
+
+                <div className="text-center">
+                  <p className="text-[10px] font-medium leading-none text-muted-foreground">BLOCK</p>
+                  <p className="text-sm font-semibold uppercase leading-tight">
+                    {blockDisplayLabel}
+                  </p>
+                </div>
+
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-7 w-7"
+                  onClick={() => setClassroomTourIndex((current) => (current + 1) % classroomTour.length)}
+                  aria-label="Next classroom building"
+                >
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+
             <FloorVisualizer
               buildingId={floorDetectionBuilding}
               floorNumber={floorDetectionFloor}
               allocations={classroomAllocations}
               externalTeacherQuery={navigatorTeacherQuery}
+              isAdmin={isAdmin()}
+              onAdminRoomAction={handleFloorVisualizerAdminAction}
             />
           </div>
         </div>
@@ -1408,13 +2360,30 @@ const SmartClassroom = () => {
       {/* Current Classroom Allocations */}
       {classroomAllocations.length > 0 && (
         <Card className="p-6">
-          <div className="mb-4 flex items-center gap-2">
-            <Clock className="h-5 w-5" />
-            <h2 className="text-xl font-semibold">Ongoing Class Sessions</h2>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Clock className="h-5 w-5" />
+              <h2 className="text-xl font-semibold">Ongoing Class Sessions</h2>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <label className="text-sm text-muted-foreground" htmlFor="allocation-time-filter">Time Slot</label>
+              <select
+                id="allocation-time-filter"
+                className="rounded-md border bg-background px-3 py-1.5 text-sm"
+                value={allocationTimeFilter}
+                onChange={(e) => setAllocationTimeFilter(e.target.value)}
+              >
+                <option value="all">All Slots</option>
+                {allocationTimeOptions.map((slot) => (
+                  <option key={slot} value={slot}>{slot}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
           <div className="grid gap-4 md:grid-cols-2">
-            {classroomAllocations.map((allocation) => (
+            {visibleAllocations.map((allocation) => (
               <div key={allocation.classroom_id} className="rounded-lg border p-4 space-y-2">
                 <div className="flex items-center justify-between">
                   <h3 className="font-semibold text-lg">Block {allocation.building_id} - Room {allocation.room_number}</h3>
@@ -1449,6 +2418,38 @@ const SmartClassroom = () => {
                     </div>
                   )}
                 </div>
+              </div>
+            ))}
+
+            {visibleAllocations.length === 0 && (
+              <div className="col-span-full rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                No allocations found for the selected time slot.
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {sessionArchive.length > 0 && (
+        <Card className="p-6">
+          <div className="mb-4 flex items-center gap-2">
+            <Clock className="h-5 w-5" />
+            <h2 className="text-xl font-semibold">Session Archive</h2>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            {sessionArchive.slice(0, 8).map((entry) => (
+              <div key={`${entry.classroom_id}-${entry.start_time}`} className="rounded-lg border p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-semibold">{entry.classroom_id}</p>
+                  <Badge className={entry.offsite_flag ? "bg-violet-500" : entry.session_status === "OCCUPIED" ? "bg-red-500" : entry.session_status === "UNATTENDED" ? "bg-yellow-500" : "bg-slate-500"}>
+                    {entry.session_status}
+                  </Badge>
+                </div>
+                <p className="text-sm text-muted-foreground">{entry.teacher_name}</p>
+                <p className="text-sm text-muted-foreground">{entry.section || "N/A"}</p>
+                <p className="text-sm text-muted-foreground">{new Date(entry.start_time).toLocaleTimeString()} - {new Date(entry.end_time).toLocaleTimeString()}</p>
+                <p className="text-xs text-muted-foreground mt-2">{entry.attendance_record}</p>
               </div>
             ))}
           </div>
