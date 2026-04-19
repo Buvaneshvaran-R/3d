@@ -69,6 +69,10 @@ const BINDING_LABELS: Record<PrintBinding, string> = {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function dbToJob(row: { [key: string]: any }): PrintJob {
+  const isPriority = typeof row.is_priority === "boolean"
+    ? row.is_priority
+    : row.status === "printing";
+
   return {
     id: row.id,
     queueNo: row.queue_no,
@@ -87,7 +91,7 @@ function dbToJob(row: { [key: string]: any }): PrintJob {
     completedAt: row.completed_at ?? undefined,
     fileUrl: row.file_url ?? undefined,
     studentEmail: row.student_email ?? undefined,
-    isPriority: row.is_priority ?? false,
+    isPriority,
   };
 }
 

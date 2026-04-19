@@ -1010,10 +1010,20 @@ const PrintDashboard = () => {
   };
 
   const handleStatusChange = async (jobId: string, newStatus: JobStatus) => {
-    const { error } = await supabase
+    let { error } = await supabase
       .from("print_jobs")
       .update({ status: newStatus, ...(newStatus === "printing" && { is_priority: true }) })
       .eq("id", jobId);
+
+    // Support older schemas where is_priority column is not present.
+    if (error && newStatus === "printing" && error.message?.includes("is_priority")) {
+      const fallback = await supabase
+        .from("print_jobs")
+        .update({ status: newStatus })
+        .eq("id", jobId);
+      error = fallback.error;
+    }
+
     if (!error) {
       setJobs((prev) =>
         prev.map((j) => (j.id === jobId ? { ...j, status: newStatus } : j))
