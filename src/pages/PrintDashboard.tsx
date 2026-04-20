@@ -76,6 +76,10 @@ interface PrintJob {
   fileUrl?: string;
   studentEmail?: string;
   rejectionReason?: string;
+  canResubmit?: boolean;
+  heldAmount?: number;
+  resubmitDeadline?: string;
+  resubmittedAt?: string;
 }
 
 interface FileEntry {
@@ -196,6 +200,10 @@ function dbToJob(row: { [key: string]: any }): PrintJob {
     fileUrl: row.file_url ?? undefined,
     studentEmail: row.student_email ?? undefined,
     rejectionReason: row.rejection_reason ?? undefined,
+    canResubmit: typeof row.can_resubmit === "boolean" ? row.can_resubmit : undefined,
+    heldAmount: typeof row.held_amount === "number" ? row.held_amount : undefined,
+    resubmitDeadline: row.resubmit_deadline ?? undefined,
+    resubmittedAt: row.resubmitted_at ?? undefined,
   };
 }
 
@@ -465,6 +473,23 @@ interface UploadFormProps {
   onSubmit: (items: Array<{ job: Omit<PrintJob, "id" | "queueNo" | "status" | "submittedAt">; file: File }>) => void;
   submitterName: string;
   rollNo: string;
+  resubmitJob?: PrintJob | null;
+  resubmitCreditAmount?: number;
+  onCancelResubmit?: () => void;
+}
+
+function makeEntryFromJob(job: PrintJob, file: File): FileEntry {
+  return {
+    id: Math.random().toString(36).slice(2),
+    file,
+    pagesInput: String(job.pages),
+    detectedPages: null,
+    copiesInput: String(job.copies),
+    color: job.color,
+    side: job.side,
+    orientation: job.orientation,
+    binding: job.binding,
+  };
 }
 
 // Inline button-group toggle for print options — selected=dark pill, unselected=plain text
@@ -513,24 +538,49 @@ function parseCopies(copiesInput: string): number {
   return Math.max(1, Math.min(20, parseInt(copiesInput) || 1));
 }
 
-const UploadForm = ({ onSubmit, submitterName, rollNo }: UploadFormProps) => {
+const UploadForm = ({
+  onSubmit,
+  submitterName,
+  rollNo,
+  resubmitJob,
+  resubmitCreditAmount,
+  onCancelResubmit,
+}: UploadFormProps) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [dragging, setDragging] = useState(false);
 
+  useEffect(() => {
+    if (!resubmitJob) {
+      return;
+    }
+    const placeholder = new File([""], resubmitJob.fileName, { type: "application/octet-stream" });
+    setEntries([makeEntryFromJob(resubmitJob, placeholder)]);
+  }, [resubmitJob?.id]);
+
   const addFiles = (files: File[]) => {
-    const newEntries: FileEntry[] = files.map((f) => ({
-      id: Math.random().toString(36).slice(2),
-      file: f,
-      pagesInput: "1",
-      detectedPages: null,
-      copiesInput: "1",
-      color: "bw" as PrintColor,
-      side: "single" as PrintSide,
-      orientation: "portrait" as PrintOrientation,
-      binding: "none" as PrintBinding,
-    }));
-    setEntries((prev) => [...prev, ...newEntries]);
+    const incoming = resubmitJob ? files.slice(0, 1) : files;
+    const newEntries: FileEntry[] = incoming.map((f) => {
+      if (!resubmitJob) {
+        return {
+          id: Math.random().toString(36).slice(2),
+          file: f,
+          pagesInput: "1",
+          detectedPages: null,
+          copiesInput: "1",
+          color: "bw" as PrintColor,
+          side: "single" as PrintSide,
+          orientation: "portrait" as PrintOrientation,
+          binding: "none" as PrintBinding,
+        };
+      }
+      return makeEntryFromJob(resubmitJob, f);
+    });
+    if (resubmitJob) {
+      setEntries(newEntries);
+    } else {
+      setEntries((prev) => [...prev, ...newEntries]);
+    }
     // auto-detect pages for PDFs asynchronously to avoid blocking UI
     newEntries.forEach((entry) => {
       if (entry.file.name.split(".").pop()?.toLowerCase() !== "pdf") return;
@@ -594,7 +644,8 @@ const UploadForm = ({ onSubmit, submitterName, rollNo }: UploadFormProps) => {
 
   const handleSubmit = () => {
     if (!entries.length) return;
-    const items = entries.map((entry) => {
+    const sourceEntries = resubmitJob ? entries.slice(0, 1) : entries;
+    const items = sourceEntries.map((entry) => {
       const pages = parsePages(entry.pagesInput);
       const copies = parseCopies(entry.copiesInput);
       const { printCost, bindingCost, amount } = calcCosts(pages, copies, entry.color, entry.side, entry.binding);
@@ -621,15 +672,32 @@ const UploadForm = ({ onSubmit, submitterName, rollNo }: UploadFormProps) => {
     setEntries([]);
   };
 
+  const isResubmitMode = !!resubmitJob;
+  const hasRealFileInResubmit = !isResubmitMode || (entries[0] && entries[0].file.size > 0);
+
   return (
     <Card className="border-none shadow-card">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-lg">
           <Upload className="w-5 h-5 text-primary" />
-          Submit Print Job
+          {isResubmitMode ? "Fix & Resubmit Job" : "Submit Print Job"}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
+        {isResubmitMode && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 space-y-1">
+            <p className="text-sm font-semibold text-amber-700">This job was rejected. Upload the corrected file and resubmit.</p>
+            <p className="text-xs text-amber-700/90">
+              Payment saved: ₹{resubmitCreditAmount ?? 0}. No extra payment required.
+            </p>
+            {onCancelResubmit && (
+              <Button type="button" size="sm" variant="outline" className="h-7 text-xs mt-1" onClick={onCancelResubmit}>
+                Cancel Resubmission
+              </Button>
+            )}
+          </div>
+        )}
+
         {/* Drop zone */}
         <div
           onClick={() => fileInputRef.current?.click()}
@@ -656,9 +724,17 @@ const UploadForm = ({ onSubmit, submitterName, rollNo }: UploadFormProps) => {
           <div className="flex flex-col items-center gap-1.5">
             <Upload className="w-8 h-8 text-muted-foreground/50" />
             <p className="font-medium text-sm text-foreground">
-              {entries.length ? "Add more files" : "Drop files here or click to browse"}
+              {isResubmitMode
+                ? "Upload corrected file"
+                : entries.length
+                ? "Add more files"
+                : "Drop files here or click to browse"}
             </p>
-            <p className="text-xs text-muted-foreground">PDF, Word, Excel, PPT, Image — multiple files supported</p>
+            <p className="text-xs text-muted-foreground">
+              {isResubmitMode
+                ? "Replaces the rejected file and keeps your existing payment"
+                : "PDF, Word, Excel, PPT, Image — multiple files supported"}
+            </p>
           </div>
         </div>
 
@@ -835,11 +911,13 @@ const UploadForm = ({ onSubmit, submitterName, rollNo }: UploadFormProps) => {
 
             <Button
               className="w-full gap-2 mt-1"
-              disabled={!entries.length}
+              disabled={!entries.length || !hasRealFileInResubmit}
               onClick={handleSubmit}
             >
               <Printer className="w-4 h-4" />
-              Proceed to Pay — ₹{totalAmount}
+              {isResubmitMode
+                ? "Resubmit to Queue (No Payment Required)"
+                : `Proceed to Pay — ₹${totalAmount}`}
             </Button>
           </div>
         )}
@@ -878,6 +956,7 @@ const PrintDashboard = () => {
   const [showPayment, setShowPayment] = useState(false);
   const [statusFilter, setStatusFilter] = useState<"all" | "queued" | "completed">("all");
   const [previewJob, setPreviewJob] = useState<PrintJob | null>(null);
+  const [resubmitJob, setResubmitJob] = useState<PrintJob | null>(null);
   const userName = user?.name ?? (admin ? "Admin Officer" : "Student");
   const rollNo = "—";
 
@@ -931,6 +1010,91 @@ const PrintDashboard = () => {
   const handleUploadSubmit = async (
     items: Array<{ job: Omit<PrintJob, "id" | "queueNo" | "status" | "submittedAt">; file: File }>
   ) => {
+    if (resubmitJob) {
+      const item = items[0];
+      if (!item) return;
+
+      const nextQueueNo = jobs.reduce((max, current) => Math.max(max, current.queueNo), 0) + 1;
+      const safeFileName = item.file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const filePath = `${Date.now()}_resubmit_${safeFileName}`;
+      let fileUrl: string | undefined;
+
+      const { error: uploadError } = await supabase.storage
+        .from("print-files")
+        .upload(filePath, item.file);
+
+      if (uploadError) {
+        console.error("Resubmission file upload error:", uploadError.message);
+      } else {
+        const { data: urlData } = supabase.storage
+          .from("print-files")
+          .getPublicUrl(filePath);
+        fileUrl = urlData.publicUrl;
+      }
+
+      const carriedAmount = resubmitJob.heldAmount ?? resubmitJob.amount;
+      const nowIso = new Date().toISOString();
+
+      let updateResult = await supabase
+        .from("print_jobs")
+        .update({
+          queue_no: nextQueueNo,
+          file_name: item.job.fileName,
+          pages: item.job.pages,
+          copies: item.job.copies,
+          color: item.job.color,
+          side: item.job.side,
+          orientation: item.job.orientation,
+          binding: item.job.binding,
+          print_cost: item.job.printCost,
+          binding_cost: item.job.bindingCost,
+          amount: carriedAmount,
+          held_amount: carriedAmount,
+          status: "queued",
+          rejection_reason: null,
+          can_resubmit: false,
+          resubmitted_at: nowIso,
+          submitted_at: nowIso,
+          ...(fileUrl && { file_url: fileUrl }),
+        })
+        .eq("id", resubmitJob.id)
+        .select()
+        .single();
+
+      if (updateResult.error && (updateResult.error.message?.includes("can_resubmit") || updateResult.error.message?.includes("held_amount") || updateResult.error.message?.includes("resubmitted_at"))) {
+        updateResult = await supabase
+          .from("print_jobs")
+          .update({
+            queue_no: nextQueueNo,
+            file_name: item.job.fileName,
+            pages: item.job.pages,
+            copies: item.job.copies,
+            color: item.job.color,
+            side: item.job.side,
+            orientation: item.job.orientation,
+            binding: item.job.binding,
+            print_cost: item.job.printCost,
+            binding_cost: item.job.bindingCost,
+            amount: carriedAmount,
+            status: "queued",
+            rejection_reason: null,
+            submitted_at: nowIso,
+            ...(fileUrl && { file_url: fileUrl }),
+          })
+          .eq("id", resubmitJob.id)
+          .select()
+          .single();
+      }
+
+      if (!updateResult.error && updateResult.data) {
+        const updated = dbToJob(updateResult.data);
+        setJobs((prev) => prev.map((job) => (job.id === updated.id ? updated : job)));
+        setResubmitJob(null);
+      }
+
+      return;
+    }
+
     // Parallelize file uploads and database inserts for faster processing
     const uploadPromises = items.map(async ({ job: jobData, file }, index) => {
       // Upload file to Supabase storage
@@ -969,6 +1133,7 @@ const PrintDashboard = () => {
           status: "pending_payment",
           file_url: fileUrl,
           student_email: user?.email,
+          held_amount: jobData.amount,
         })
         .select()
         .single();
@@ -1129,6 +1294,9 @@ const PrintDashboard = () => {
             onSubmit={handleUploadSubmit}
             submitterName={userName}
             rollNo={rollNo}
+            resubmitJob={resubmitJob}
+            resubmitCreditAmount={resubmitJob?.heldAmount ?? resubmitJob?.amount}
+            onCancelResubmit={() => setResubmitJob(null)}
           />
         </div>
 
@@ -1227,6 +1395,21 @@ const PrintDashboard = () => {
                                 <p className="text-xs text-red-600 italic mt-1 max-w-[200px]">
                                   Reason: {job.rejectionReason}
                                 </p>
+                              )}
+                              {job.status === "cancelled" && job.canResubmit && !job.resubmittedAt && (
+                                <div className="mt-2 space-y-1">
+                                  <p className="text-[11px] text-amber-700">
+                                    Payment saved: ₹{job.heldAmount ?? job.amount}. You can fix and resubmit without paying again.
+                                  </p>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    className="h-7 text-xs px-2.5"
+                                    onClick={() => setResubmitJob(job)}
+                                  >
+                                    Fix and Resubmit
+                                  </Button>
+                                </div>
                               )}
                             </div>
                           </TableCell>
