@@ -57,6 +57,11 @@ interface PrintJob {
   fileUrl?: string;
   studentEmail?: string;
   isPriority?: boolean;
+  rejectionReason?: string;
+  canResubmit?: boolean;
+  heldAmount?: number;
+  resubmitDeadline?: string;
+  resubmittedAt?: string;
 }
 
 // ---------- Helpers ----------
@@ -92,6 +97,11 @@ function dbToJob(row: { [key: string]: any }): PrintJob {
     fileUrl: row.file_url ?? undefined,
     studentEmail: row.student_email ?? undefined,
     isPriority,
+    rejectionReason: row.rejection_reason ?? undefined,
+    canResubmit: typeof row.can_resubmit === "boolean" ? row.can_resubmit : undefined,
+    heldAmount: typeof row.held_amount === "number" ? row.held_amount : undefined,
+    resubmitDeadline: row.resubmit_deadline ?? undefined,
+    resubmittedAt: row.resubmitted_at ?? undefined,
   };
 }
 
@@ -428,6 +438,55 @@ const PrintKeeperPortal = () => {
 
   const totalPagesHandled = completedJobs.reduce((s, j) => s + j.pages * j.copies, 0);
 
+  const sendRejectNotification = async (job: PrintJob, reason: string) => {
+    if (!job.studentEmail) {
+      console.warn("Unable to send rejection notification: student email missing", job.id);
+      return;
+    }
+
+    const { data: studentData, error: studentError } = await supabase
+      .from("students")
+      .select("id")
+      .eq("email", job.studentEmail)
+      .single();
+
+    if (studentError || !studentData) {
+      console.warn("Unable to map student for rejection notification", studentError?.message ?? "student not found");
+      return;
+    }
+
+    const heldAmount = job.heldAmount ?? job.amount;
+    const message = `Your print job #${job.queueNo} (${job.fileName}) was rejected. Reason: ${reason}. Use Fix and Resubmit to correct and re-submit without paying again. Saved amount: ₹${heldAmount}.`;
+
+    let insertResult = await supabase
+      .from("notifications")
+      .insert({
+        recipient_id: studentData.id,
+        recipient_type: "student",
+        subject: "Print Job Rejected - Fix and Resubmit Available",
+        message,
+        request_type: "print_service",
+        status: "rejected",
+      });
+
+    // Compatibility fallback for environments with legacy notifications schema.
+    if (insertResult.error && (insertResult.error.message?.includes("recipient_type") || insertResult.error.message?.includes("request_type") || insertResult.error.message?.includes("subject"))) {
+      insertResult = await supabase
+        .from("notifications")
+        .insert({
+          user_id: null,
+          title: "Print Job Rejected - Fix and Resubmit Available",
+          message,
+          type: "print_service",
+          is_read: false,
+        });
+    }
+
+    if (insertResult.error) {
+      console.warn("Failed to send print rejection notification", insertResult.error.message);
+    }
+  };
+
   const handleMarkDone = async (jobId: string) => {
     try {
       const now = new Date().toISOString();
@@ -476,11 +535,35 @@ const PrintKeeperPortal = () => {
   const handleReject = async (jobId: string, reason: string) => {
     try {
       console.log('Rejecting job:', jobId, 'with reason:', reason);
-      const { data, error } = await supabase
+      const job = jobs.find((j) => j.id === jobId) ?? selectedJob;
+      if (!job) {
+        alert("Unable to reject job: job record not found.");
+        return;
+      }
+      const deadlineIso = new Date(Date.now() + (24 * 60 * 60 * 1000)).toISOString();
+
+      let { data, error } = await supabase
         .from("print_jobs")
-        .update({ status: "cancelled", rejection_reason: reason })
+        .update({
+          status: "cancelled",
+          rejection_reason: reason,
+          can_resubmit: true,
+          held_amount: job.amount,
+          resubmit_deadline: deadlineIso,
+          resubmitted_at: null,
+        })
         .eq("id", jobId)
         .select();
+
+      if (error && (error.message?.includes('can_resubmit') || error.message?.includes('held_amount') || error.message?.includes('resubmit_deadline') || error.message?.includes('resubmitted_at'))) {
+        const fallback = await supabase
+          .from("print_jobs")
+          .update({ status: "cancelled", rejection_reason: reason })
+          .eq("id", jobId)
+          .select();
+        data = fallback.data;
+        error = fallback.error;
+      }
       
       if (error) {
         console.error('Failed to reject job:', error);
@@ -495,7 +578,17 @@ const PrintKeeperPortal = () => {
       }
       
       console.log('Job rejected successfully:', data);
-      setJobs((prev) => prev.map((j) => j.id === jobId ? { ...j, status: "cancelled" } : j));
+      setJobs((prev) => prev.map((j) => j.id === jobId ? {
+        ...j,
+        status: "cancelled",
+        rejectionReason: reason,
+        canResubmit: true,
+        heldAmount: j.amount,
+        resubmitDeadline: deadlineIso,
+        resubmittedAt: undefined,
+      } : j));
+
+      await sendRejectNotification(job, reason);
     } catch (err) {
       console.error('Exception while rejecting job:', err);
       alert('An error occurred while rejecting the job.');
