@@ -74,6 +74,21 @@ interface ScheduleSlot {
   session_status?: string | null;
 }
 
+interface AllocationTemplateRow {
+  id: string;
+  block_code: string;
+  floor_number: number;
+  room_number: number;
+  day_of_week: string;
+  slot_start: string;
+  slot_end: string;
+  subject: string | null;
+  teacher_name: string | null;
+  department: string | null;
+  section: string | null;
+  status: string | null;
+}
+
 interface TeacherProfile {
   user_id: string;
   name: string;
@@ -265,6 +280,36 @@ const isTeacherNameMatch = (name: string, query: string) => {
   );
 };
 
+const parseTemplateTimeOnDate = (referenceDate: Date, timeValue: string) => {
+  const parts = String(timeValue || "").split(":");
+  if (parts.length < 2) return null;
+
+  const hours = Number(parts[0]);
+  const minutes = Number(parts[1]);
+  const seconds = Number(parts[2] || 0);
+
+  if (
+    Number.isNaN(hours) || Number.isNaN(minutes) || Number.isNaN(seconds) ||
+    hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59
+  ) {
+    return null;
+  }
+
+  const parsed = new Date(referenceDate);
+  parsed.setHours(hours, minutes, seconds, 0);
+  return parsed;
+};
+
+const toLiveState = (status?: string | null): LiveClassroomState => {
+  const normalized = String(status || "SCHEDULED").trim().toUpperCase();
+  if (normalized === "FREE") return "FREE";
+  if (normalized === "OCCUPIED") return "OCCUPIED";
+  if (normalized === "UNATTENDED") return "UNATTENDED";
+  if (normalized === "SESSION_COMPLETED") return "SESSION_COMPLETED";
+  if (normalized === "OFFSITE") return "OFFSITE";
+  return "SCHEDULED";
+};
+
 const SmartClassroom = () => {
   const { user, isAdmin, isStudent } = useAuth();
   const navigate = useNavigate();
@@ -274,6 +319,7 @@ const SmartClassroom = () => {
   const [floors, setFloors] = useState<Floor[]>([]);
   const [classrooms, setClassrooms] = useState<Classroom[]>([]);
   const [schedules, setSchedules] = useState<ScheduleSlot[]>([]);
+  const [allocationTemplates, setAllocationTemplates] = useState<AllocationTemplateRow[]>([]);
   const [teachers, setTeachers] = useState<TeacherProfile[]>([]);
   const [timetables, setTimetables] = useState<TimetableEntry[]>([]);
   const [classroomAllocations, setClassroomAllocations] = useState<ClassroomAllocation[]>([]);
@@ -403,6 +449,7 @@ const SmartClassroom = () => {
   const calculateAllocations = () => {
     const now = currentTime;
     const allocations: ClassroomAllocation[] = [];
+    const allocationKeys = new Set<string>();
 
     schedules.forEach((schedule) => {
       const slot = normalizeSchedule(schedule);
@@ -444,8 +491,50 @@ const SmartClassroom = () => {
             department: slot.department || teacher.department,
             teacher_user_id: slot.teacher_user_id,
           });
+
+          allocationKeys.add(
+            `${slot.classroom_id}-${slotStart.toISOString()}-${slotEnd.toISOString()}`
+          );
         }
       }
+    });
+
+    // Fallback for uploaded timetable templates when schedule slots are unavailable.
+    allocationTemplates.forEach((template) => {
+      const slotStart = parseTemplateTimeOnDate(now, template.slot_start);
+      const slotEnd = parseTemplateTimeOnDate(now, template.slot_end);
+      if (!slotStart || !slotEnd || slotEnd <= slotStart) return;
+
+      if (!(now >= slotStart && now <= slotEnd)) return;
+
+      const matchedClassroom = classrooms.find((room) => {
+        if (room.floor_number !== template.floor_number) return false;
+        if (room.classroom_number !== template.room_number) return false;
+        return getBlockCode(room.block_id) === String(template.block_code || "").toUpperCase();
+      });
+
+      const classroomId = matchedClassroom?.id || `${template.block_code}-${template.floor_number}-${template.room_number}`;
+      const dedupeKey = `${classroomId}-${slotStart.toISOString()}-${slotEnd.toISOString()}`;
+      if (allocationKeys.has(dedupeKey)) return;
+
+      const liveState = toLiveState(template.status);
+      const isStaffPresent = liveState === "OCCUPIED";
+
+      allocations.push({
+        classroom_id: classroomId,
+        building_id: String(template.block_code || "").toUpperCase(),
+        floor_number: template.floor_number,
+        room_number: template.room_number,
+        allocated_staff: template.teacher_name || "Unknown Teacher",
+        subject: template.subject || "N/A",
+        batch: template.section || "N/A",
+        time_start: slotStart.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        time_end: slotEnd.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        is_staff_present: isStaffPresent,
+        session_status: liveState,
+        department: template.department,
+      });
+      allocationKeys.add(dedupeKey);
     });
 
     setClassroomAllocations(allocations);
@@ -493,6 +582,7 @@ const SmartClassroom = () => {
       setClassrooms(mockDataset.classrooms as Classroom[]);
       setTeachers(mockDataset.teachers as TeacherProfile[]);
       setSchedules(mockDataset.schedules as ScheduleSlot[]);
+      setAllocationTemplates([]);
       return;
     }
 
@@ -527,6 +617,18 @@ const SmartClassroom = () => {
       setIsScheduleTableAvailable(false);
       setSchedules([]);
     }
+
+    const currentDay = new Date().toLocaleDateString("en-US", { weekday: "long" });
+    const templateRes = await supabase
+      .from("classroom_allocation_templates")
+      .select("id,block_code,floor_number,room_number,day_of_week,slot_start,slot_end,subject,teacher_name,department,section,status")
+      .eq("day_of_week", currentDay);
+
+    if (!templateRes.error) {
+      setAllocationTemplates((templateRes.data || []) as AllocationTemplateRow[]);
+    } else {
+      setAllocationTemplates([]);
+    }
   };
 
   // Fetch core data and subscribe to realtime updates.
@@ -552,6 +654,11 @@ const SmartClassroom = () => {
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "classroom_schedule_slots" },
+        fetchData
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "classroom_allocation_templates" },
         fetchData
       )
       .subscribe();
@@ -609,7 +716,7 @@ const SmartClassroom = () => {
   useEffect(() => {
     calculateAllocations();
     checkStaffPresence();
-  }, [schedules, classrooms, teachers, currentTime]);
+  }, [schedules, classrooms, teachers, currentTime, allocationTemplates]);
 
   // Update current time every minute
   useEffect(() => {
